@@ -58,19 +58,17 @@ mkdir -p "$MENU_PATH"
 
 # Write desktop entry configuration
 write_desktop_file() {
-    cat <<EOF
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=WatsUp Streamer
-Comment=Zero-Browser WhatsApp Streamer for Heavy Files
-Exec=bash $APP_DIR/launch.sh
-Icon=$APP_DIR/watsup.png
-Path=$APP_DIR
-Terminal=true
-StartupNotify=false
-Categories=Network;Utility;
-EOF
+    echo "[Desktop Entry]"
+    echo "Version=1.0"
+    echo "Type=Application"
+    echo "Name=WatsUp Streamer"
+    echo "Comment=Zero-Browser WhatsApp Streamer for Heavy Files"
+    echo "Exec=bash $APP_DIR/launch.sh"
+    echo "Icon=$APP_DIR/watsup.png"
+    echo "Path=$APP_DIR"
+    echo "Terminal=true"
+    echo "StartupNotify=false"
+    echo "Categories=Network;Utility;"
 }
 
 # Save desktop shortcuts
