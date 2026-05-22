@@ -6,7 +6,7 @@
  */
 
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcodeTerminal = require('qrcode-terminal');
 const fs = require('fs');
@@ -137,11 +137,24 @@ async function connectToWhatsApp() {
         }
     });
 
+    // Fetch the latest WhatsApp Web version dynamically to avoid connection code 405 error
+    let version = [2, 3000, 1015970061]; // Robust fallback version
+    let isLatest = false;
+    try {
+        const latest = await fetchLatestBaileysVersion();
+        version = latest.version;
+        isLatest = latest.isLatest;
+        console.log(`[Baileys] Dynamically fetched latest WA Web version: ${version.join('.')} (isLatest: ${isLatest})`);
+    } catch (err) {
+        console.error('[Baileys] Error fetching latest WA Web version, using hardcoded fallback:', err);
+    }
+
     sock = makeWASocket({
         auth: state,
         logger: silentLogger,
+        version: version,
         // Mimic an Android tablet / desktop on Linux for optimal and fast upload limits
-        browser: ['Linux', 'Chrome', '110.0.0.0'],
+        browser: ['Linux', 'Chrome', '120.0.0.0'],
         printQRInTerminal: false, // We will custom print this to avoid overflow
         syncFullHistory: false    // Do not sync history to conserve system RAM
     });
