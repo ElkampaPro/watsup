@@ -1,3 +1,4 @@
+cat << 'EOF' > launch.sh
 #!/bin/bash
 # WatsUp Streamer - launch.sh
 # Multi-purpose self-installing launcher for background Node.js engine and Python Tkinter GUI.
@@ -45,7 +46,7 @@ fi
 # 3. Premium Assets: Download green WhatsApp icon if missing
 if [ ! -f "watsup.png" ]; then
     echo "🎨 Downloading official premium WhatsApp icon..."
-    curl -fsSL -o watsup.png https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/512px-WhatsApp.svg.png
+    curl -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -fsSL -o watsup.png https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/512px-WhatsApp.svg.png
 fi
 
 # 4. Desktop Integration: Create dynamic shortcuts pointing to current path
@@ -122,3 +123,4 @@ fi
 
 echo "✨ Goodbye!"
 sleep 1
+EOF
