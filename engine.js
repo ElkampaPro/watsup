@@ -12,6 +12,7 @@ const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const { Transform } = require('stream');
 
 const app = express();
 const PORT = 5001;
@@ -23,12 +24,38 @@ app.use(express.json());
 const authDir = path.join(__dirname, 'auth_info_baileys');
 const cachePath = path.join(__dirname, 'contacts_cache.json');
 
+// Progress monitoring transform stream
+class ProgressStream extends Transform {
+    constructor(totalBytes, onProgress) {
+        super();
+        this.totalBytes = totalBytes;
+        this.bytesRead = 0;
+        this.onProgress = onProgress;
+    }
+
+    _transform(chunk, encoding, callback) {
+        this.bytesRead += chunk.length;
+        const percentage = Math.min(Math.round((this.bytesRead / this.totalBytes) * 100), 99); // Cap at 99% until socket resolves
+        this.onProgress(this.bytesRead, this.totalBytes, percentage);
+        this.push(chunk);
+        callback();
+    }
+}
+
 // Global engine states
 let sock = null;
 let connectionState = {
     status: 'disconnected', // 'disconnected' | 'connecting' | 'connected'
     userInfo: null,          // Logged-in WhatsApp details
     qrAvailable: false
+};
+
+let uploadProgress = {
+    active: false,
+    fileName: '',
+    bytesSent: 0,
+    totalBytes: 0,
+    percentage: 0
 };
 
 const contactsMap = new Map();
@@ -277,7 +304,10 @@ connectToWhatsApp();
  * Returns connection state and session details
  */
 app.get('/api/status', (req, res) => {
-    res.json(connectionState);
+    res.json({
+        ...connectionState,
+        uploadProgress: uploadProgress
+    });
 });
 
 /**
@@ -343,21 +373,51 @@ app.post('/api/send', async (req, res) => {
     const fileStats = fs.statSync(filePath);
     const fileName = path.basename(filePath);
     const mimetype = getMimeType(filePath);
+    const totalBytes = fileStats.size;
 
-    console.log(`[Pipeline] Opening stream for transmission: ${fileName} (${(fileStats.size / (1024*1024)).toFixed(2)} MB) -> ${jid}`);
+    console.log(`[Pipeline] Opening stream for transmission: ${fileName} (${(totalBytes / (1024*1024)).toFixed(2)} MB) -> ${jid}`);
+
+    // Initialize progress tracking state
+    uploadProgress = {
+        active: true,
+        fileName: fileName,
+        bytesSent: 0,
+        totalBytes: totalBytes,
+        percentage: 0
+    };
 
     try {
-        // Direct stream: passing local disk path triggers high-efficiency background streaming & block-by-block encryption.
-        // It guarantees the heap memory never holds more than a couple of blocks (~64KB each) at any given time.
+        let lastLoggedPercent = -1;
+        const fileStream = fs.createReadStream(filePath);
+        const progressStream = fileStream.pipe(new ProgressStream(totalBytes, (bytesRead, total, percentage) => {
+            uploadProgress.bytesSent = bytesRead;
+            uploadProgress.percentage = percentage;
+            
+            // Log to terminal at 10% milestones to keep console clean and useful
+            const rounded = Math.floor(percentage / 10) * 10;
+            if (rounded > lastLoggedPercent) {
+                console.log(`[Pipeline] Streamed ${rounded}% (${(bytesRead / (1024 * 1024)).toFixed(2)} MB / ${(total / (1024 * 1024)).toFixed(2)} MB)`);
+                lastLoggedPercent = rounded;
+            }
+        }));
+
+        // Send via a memory-efficient dynamic readable stream
         await sock.sendMessage(jid, {
-            document: { url: filePath },
+            document: { stream: progressStream },
             mimetype: mimetype,
             fileName: fileName
         });
 
+        // Set to 100% on successful completion
+        uploadProgress.bytesSent = totalBytes;
+        uploadProgress.percentage = 100;
+        uploadProgress.active = false;
+
         console.log(`[Pipeline] Completed streaming transmission of: ${fileName}`);
         res.json({ success: true, message: 'File streamed and sent successfully!' });
     } catch (err) {
+        // Reset progress monitoring on exception
+        uploadProgress.active = false;
         console.error('[Pipeline] High-performance transfer failed:', err);
         res.status(500).json({ success: false, error: `Transmission failed: ${err.message}` });
     }

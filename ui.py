@@ -39,6 +39,7 @@ class WatsUpUI:
         self.polling_active = True
         self.qr_popup = None
         self.qr_photo = None
+        self.upload_active = False
         
         # Custom TTK styles
         self.setup_styles()
@@ -130,7 +131,25 @@ class WatsUpUI:
         
         # Step 3: Trigger Button & Progress indicators
         self.send_btn = ttk.Button(inner_board, text="Send via local disk stream", state="disabled", command=self.initiate_transmission)
-        self.send_btn.pack(fill="x", pady=(25, 15))
+        self.send_btn.pack(fill="x", pady=(25, 10))
+        
+        # Progress indicator panel
+        self.progress_frame = tk.Frame(inner_board, background=self.card_color)
+        self.progress_frame.pack(fill="x", pady=(0, 15))
+        
+        # Row 1 of progress panel: Labels side-by-side
+        labels_row = tk.Frame(self.progress_frame, background=self.card_color)
+        labels_row.pack(fill="x", pady=(0, 5))
+        
+        self.progress_status_label = ttk.Label(labels_row, text="Upload Progress: Idle", style="CardLabel.TLabel")
+        self.progress_status_label.pack(side="left")
+        
+        self.progress_percent_label = ttk.Label(labels_row, text="0%", style="CardLabel.TLabel", foreground=self.accent_color, font=("Helvetica", 10, "bold"))
+        self.progress_percent_label.pack(side="right")
+        
+        # Row 2 of progress panel: Full-width progress bar
+        self.progress_bar = ttk.Progressbar(self.progress_frame, orient="horizontal", mode="determinate")
+        self.progress_bar.pack(fill="x", expand=True)
         
         # Info Logger Pane
         self.logger_box = tk.Text(inner_board, height=4, bg="#111827", fg="#f3f4f6", insertbackground="#ffffff",
@@ -208,9 +227,19 @@ class WatsUpUI:
         threading.Thread(target=self.poll_state_loop, daemon=True).start()
         
     def poll_state_loop(self):
+        counter = 0
         while self.polling_active:
             self.check_engine_status()
-            time.sleep(2)  # Non-intrusive status poll frequency
+            counter += 1
+            
+            # Fast polling (0.5s) during active upload, slow polling (2s) when idle
+            if self.upload_active:
+                sleep_time = 0.5
+            else:
+                sleep_time = 2.0
+                if self.connection_status == "connected" and counter % 5 == 0:
+                    threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
+            time.sleep(sleep_time)
 
     def check_engine_status(self):
         status_res = self.make_api_request("/api/status")
@@ -227,6 +256,20 @@ class WatsUpUI:
                 
                 self.root.after(0, self.update_status_ui, "CONNECTED", f"Linked Device: +{user_id} ({user_name})", "Online.TLabel")
                 self.root.after(0, self.close_qr_popup)
+                
+                # Check dynamic upload progress
+                upload_progress = status_res.get("uploadProgress", {})
+                if upload_progress.get("active", False):
+                    percentage = upload_progress.get("percentage", 0)
+                    file_name = upload_progress.get("fileName", "")
+                    bytes_sent = self.format_bytes(upload_progress.get("bytesSent", 0))
+                    total_bytes = self.format_bytes(upload_progress.get("totalBytes", 0))
+                    
+                    self.upload_active = True
+                    self.root.after(0, self.update_progress_ui, percentage, f"Streaming: {file_name}", f"{percentage}% ({bytes_sent}/{total_bytes})")
+                else:
+                    if not self.upload_active:
+                        self.root.after(0, self.update_progress_ui, 0, "Upload Progress: Idle", "0%")
                 
                 # If contacts map is empty, trigger a background sync fetch
                 if not self.contacts_data:
@@ -350,6 +393,7 @@ class WatsUpUI:
         self.recipient_combobox.config(state="disabled")
         
         self.log_message("Initiating stream pipeline...")
+        self.upload_active = True # Speed up polling to 0.5s for smooth progress animation
         
         # Execute the transmission worker on a background thread so Tkinter remains completely responsive
         threading.Thread(target=self.transmission_worker, daemon=True).start()
@@ -392,18 +436,26 @@ class WatsUpUI:
         self.send_btn.config(state="normal")
         self.browse_btn.config(state="normal")
         self.recipient_combobox.config(state="normal")
+        self.upload_active = False # Revert to slow polling (2.0s)
         
         self.log_message(message)
         
         if success:
+            self.update_progress_ui(100, "Upload Completed Successfully!", "100%")
             messagebox.showinfo("Success", message, parent=self.root)
             # Reset UI files selection
             self.selected_file_path = ""
             self.file_details_label.config(text="No file selected.", foreground="#9ca3af")
         else:
+            self.update_progress_ui(0, "Upload Failed!", "0%")
             messagebox.showerror("Error", message, parent=self.root)
             
         self.validate_inputs()
+
+    def update_progress_ui(self, value, status_text, percent_text=""):
+        self.progress_bar["value"] = value
+        self.progress_status_label.config(text=status_text)
+        self.progress_percent_label.config(text=percent_text)
 
     # ==========================================
     # LOW-LEVEL IPC API UTILITIES
