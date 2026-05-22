@@ -37,6 +37,8 @@ class WatsUpUI:
         self.selected_file_path = ""
         self.connection_status = "offline"
         self.polling_active = True
+        self.qr_popup = None
+        self.qr_photo = None
         
         # Custom TTK styles
         self.setup_styles()
@@ -224,26 +226,95 @@ class WatsUpUI:
                 user_name = user_info.get("name", "Device")
                 
                 self.root.after(0, self.update_status_ui, "CONNECTED", f"Linked Device: +{user_id} ({user_name})", "Online.TLabel")
+                self.root.after(0, self.close_qr_popup)
                 
                 # If contacts map is empty, trigger a background sync fetch
                 if not self.contacts_data:
                     threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
             elif status == "connecting":
                 self.root.after(0, self.update_status_ui, "CONNECTING", "Establishing raw socket interfaces...", "Offline.TLabel")
+                self.root.after(0, self.close_qr_popup)
             else:
-                self.root.after(0, self.update_status_ui, "PAIRING REQUIRED", "Engine connected. Terminal scanning requested.", "Offline.TLabel")
+                self.root.after(0, self.update_status_ui, "PAIRING REQUIRED", "Engine connected. Scan the QR code in the popup.", "Offline.TLabel")
+                if status_res.get("qrAvailable", False):
+                    self.root.after(0, self.show_qr_popup)
+                else:
+                    self.root.after(0, self.close_qr_popup)
         else:
             # Engine server is offline entirely
             self.connection_status = "offline"
             self.contacts_data = {}
             self.root.after(0, self.update_status_ui, "ENGINE OFFLINE", "Run 'node engine.js' in your terminal SSH window.", "Offline.TLabel")
             self.root.after(0, self.clear_contacts_dropdown)
+            self.root.after(0, self.close_qr_popup)
             
         self.root.after(0, self.validate_inputs)
 
     def update_status_ui(self, status_text, detail_text, style_class):
         self.status_val_label.config(text=status_text, style=style_class)
         self.session_user_label.config(text=detail_text)
+
+    def show_qr_popup(self):
+        if self.qr_popup is not None:
+            # Already open, just update it
+            self.update_qr_popup()
+            return
+            
+        # Create a new modern dark-themed popup window
+        self.qr_popup = tk.Toplevel(self.root)
+        self.qr_popup.title("Scan WhatsApp QR Code")
+        self.qr_popup.geometry("340x390")
+        self.qr_popup.resizable(False, False)
+        self.qr_popup.configure(bg=self.bg_color)
+        self.qr_popup.transient(self.root) # Make it modal
+        
+        # Center popup relative to main window
+        x = self.root.winfo_x() + (self.root.winfo_width() - 340) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 390) // 2
+        self.qr_popup.geometry(f"+{x}+{y}")
+        
+        # Add labels
+        title = ttk.Label(self.qr_popup, text="Link Your Device", font=("Helvetica", 14, "bold"), foreground=self.text_color, background=self.bg_color)
+        title.pack(pady=(15, 5))
+        
+        instruction = ttk.Label(self.qr_popup, text="Scan this QR code with WhatsApp on your phone\n(Linked Devices -> Link a Device)", 
+                                font=("Helvetica", 9), foreground="#9ca3af", background=self.bg_color, justify="center")
+        instruction.pack(pady=5)
+        
+        # Image canvas/label
+        self.qr_img_label = tk.Label(self.qr_popup, bg=self.card_color, relief="solid", borderwidth=1, width=280, height=280)
+        self.qr_img_label.pack(pady=10)
+        
+        # Bind close event
+        def on_popup_close():
+            self.qr_popup.destroy()
+            self.qr_popup = None
+            
+        self.qr_popup.protocol("WM_DELETE_WINDOW", on_popup_close)
+        
+        # Load the QR image
+        self.update_qr_popup()
+
+    def update_qr_popup(self):
+        if self.qr_popup is None:
+            return
+            
+        qr_img_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qr.png")
+        if os.path.exists(qr_img_path):
+            try:
+                # PhotoImage natively loads standard PNG images perfectly in Python 3.4+
+                self.qr_photo = tk.PhotoImage(file=qr_img_path)
+                self.qr_img_label.config(image=self.qr_photo, text="")
+            except Exception as e:
+                self.qr_img_label.config(text="Loading QR image...", image="", foreground="#9ca3af")
+        else:
+            self.qr_img_label.config(text="Waiting for QR code...", image="", foreground="#9ca3af")
+
+    def close_qr_popup(self):
+        if self.qr_popup is not None:
+            self.qr_popup.destroy()
+            self.qr_popup = None
+            self.qr_photo = None
 
     def clear_contacts_dropdown(self):
         self.recipient_combobox['values'] = []

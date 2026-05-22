@@ -9,6 +9,7 @@ const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 
@@ -26,7 +27,8 @@ const cachePath = path.join(__dirname, 'contacts_cache.json');
 let sock = null;
 let connectionState = {
     status: 'disconnected', // 'disconnected' | 'connecting' | 'connected'
-    userInfo: null          // Logged-in WhatsApp details
+    userInfo: null,          // Logged-in WhatsApp details
+    qrAvailable: false
 };
 
 const contactsMap = new Map();
@@ -175,6 +177,19 @@ async function connectToWhatsApp() {
             
             console.log('\n======================================================================\n');
             connectionState.status = 'disconnected';
+            connectionState.qrAvailable = true;
+
+            // Generate PNG and save it to disk as qr.png for Tkinter UI to display
+            QRCode.toFile(path.join(__dirname, 'qr.png'), qr, {
+                width: 260,
+                margin: 1
+            }, (err) => {
+                if (err) {
+                    console.error('[Engine] Failed to save QR code image:', err);
+                } else {
+                    console.log('[Engine] QR code image written to disk: qr.png');
+                }
+            });
         }
 
         if (connection === 'close') {
@@ -184,6 +199,13 @@ async function connectToWhatsApp() {
             
             connectionState.status = 'disconnected';
             connectionState.userInfo = null;
+            connectionState.qrAvailable = false;
+
+            // Delete qr.png if it exists
+            const qrFile = path.join(__dirname, 'qr.png');
+            if (fs.existsSync(qrFile)) {
+                try { fs.unlinkSync(qrFile); } catch (e) {}
+            }
 
             if (shouldReconnect) {
                 setTimeout(() => connectToWhatsApp(), 3000);
@@ -199,6 +221,13 @@ async function connectToWhatsApp() {
             
             connectionState.status = 'connected';
             connectionState.userInfo = sock.user;
+            connectionState.qrAvailable = false;
+
+            // Delete qr.png if it exists
+            const qrFile = path.join(__dirname, 'qr.png');
+            if (fs.existsSync(qrFile)) {
+                try { fs.unlinkSync(qrFile); } catch (e) {}
+            }
         }
     });
 
