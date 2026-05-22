@@ -119,4 +119,9 @@ if [ -n "$ENGINE_PID" ]; then
 fi
 
 echo "✨ Goodbye!"
-sleep 1
+echo ""
+echo "=========================================================="
+echo " Press [ENTER] to exit and close this terminal..."
+echo "=========================================================="
+read -r
+
