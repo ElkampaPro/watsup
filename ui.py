@@ -423,8 +423,8 @@ class WatsUpUI:
         
         self.log_message(f"Engine is streaming {os.path.basename(self.selected_file_path)}...")
         
-        # Post request to engine API endpoint
-        res = self.make_api_request("/api/send", data=payload)
+        # Post request to engine API endpoint with a long timeout (30 mins) for heavy file streams
+        res = self.make_api_request("/api/send", data=payload, timeout=1800)
         
         if res.get("success", False):
             self.root.after(0, self.post_transmission_ui, True, "File streamed and sent successfully!")
@@ -461,7 +461,7 @@ class WatsUpUI:
     # LOW-LEVEL IPC API UTILITIES
     # ==========================================
 
-    def make_api_request(self, path, data=None):
+    def make_api_request(self, path, data=None, timeout=8):
         """
         Urllib-based API interface. Completely native.
         """
@@ -473,8 +473,8 @@ class WatsUpUI:
                 data=req_data,
                 headers={'Content-Type': 'application/json'} if data else {}
             )
-            # Short timeout to keep UI fluid and responsive on crashes
-            with urllib.request.urlopen(req, timeout=8) as response:
+            # Support dynamic timeouts (short for polling, long for streaming)
+            with urllib.request.urlopen(req, timeout=timeout) as response:
                 return json.loads(response.read().decode('utf-8'))
         except urllib.error.URLError as e:
             return {"offline_flag": True, "error": str(e)}
