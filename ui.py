@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+cat << 'EOF' > ui.py
+#!/bin/env python3
 """
 WatsUp Streamer - ui.py
 Native, ultra-lightweight Tkinter GUI for Ubuntu RDP.
@@ -88,7 +89,7 @@ class WatsUpUI:
         status_card = ttk.Frame(self.root, style="Card.TFrame")
         status_card.pack(fill="x", padx=20, pady=10)
         
-        inner_status = ttk.Frame(status_card, background=self.card_color)
+        inner_status = tk.Frame(status_card, background=self.card_color)
         inner_status.pack(fill="x", padx=15, pady=15)
         
         ttk.Label(inner_status, text="WhatsApp Session Status:", style="Title.TLabel").grid(row=0, column=0, sticky="w")
@@ -102,7 +103,7 @@ class WatsUpUI:
         control_board = ttk.Frame(self.root, style="Card.TFrame")
         control_board.pack(fill="both", expand=True, padx=20, pady=10)
         
-        inner_board = ttk.Frame(control_board, background=self.card_color)
+        inner_board = tk.Frame(control_board, background=self.card_color)
         inner_board.pack(fill="both", expand=True, padx=20, pady=20)
         
         # Step 1: Destination Selection
@@ -117,7 +118,7 @@ class WatsUpUI:
         # Step 2: File Browser Picker
         ttk.Label(inner_board, text="2. CHOOSE HEAVY FILE FOR LOCAL STREAMING (MAX 2GB)", style="Title.TLabel").pack(anchor="w")
         
-        file_picker_frame = ttk.Frame(inner_board, background=self.card_color)
+        file_picker_frame = tk.Frame(inner_board, background=self.card_color)
         file_picker_frame.pack(fill="x", pady=8)
         
         self.browse_btn = ttk.Button(file_picker_frame, text="Browse File...", style="Browse.TButton", command=self.open_file_dialog)
@@ -388,3 +389,4 @@ if __name__ == "__main__":
         
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
+EOF
