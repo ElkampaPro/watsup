@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=WatsUp Streamer
+Comment=Zero-Browser WhatsApp Streamer for Heavy Files
+Exec=bash /app/watsup/launch.sh
+Icon=/usr/share/pixmaps/watsup.png
+Path=/app/watsup
+Terminal=true
+StartupNotify=false
+Categories=Network;Utility;
