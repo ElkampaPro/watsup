@@ -45,7 +45,7 @@ fi
 # 3. Premium Assets: Download green WhatsApp icon if missing
 if [ ! -f "watsup.png" ]; then
     echo "🎨 Downloading official premium WhatsApp icon..."
-    curl -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -fsSL -o watsup.png https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/512px-WhatsApp.svg.png
+    curl -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -fsSL -o watsup.png https://cdn-icons-png.flaticon.com/512/124/124034.png
 fi
 
 # 4. Desktop Integration: Create dynamic shortcuts pointing to current path
@@ -78,16 +78,17 @@ chmod +x "$MENU_PATH/watsup.desktop"
 
 # 5. Core Execution
 if lsof -Pi :5001 -sTCP:LISTEN -t >/dev/null ; then
-    echo "ℹ️ Node.js Engine is already running in the background."
-    ENGINE_PID=""
-else
-    echo "⚡ Starting background Node.js WhatsApp Engine..."
-    node engine.js > engine.log 2>&1 &
-    ENGINE_PID=$!
-    
-    echo "⏳ Initializing engine socket layers (3 seconds)..."
-    sleep 3
+    echo "🔄 Existing Node.js Engine detected on port 5001. Restarting with new code..."
+    kill -9 $(lsof -t -i:5001) 2>/dev/null
+    sleep 1
 fi
+
+echo "⚡ Starting background Node.js WhatsApp Engine..."
+node engine.js > engine.log 2>&1 &
+ENGINE_PID=$!
+
+echo "⏳ Initializing engine socket layers (3 seconds)..."
+sleep 3
 
 echo ""
 echo "----------------------------------------------------------"

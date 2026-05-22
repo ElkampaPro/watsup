@@ -42,7 +42,7 @@ RUN npm install --production
 RUN chmod +x launch.sh
 
 # Download a beautiful official WhatsApp icon for a premium look
-RUN curl -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -fsSL -o /usr/share/pixmaps/watsup.png https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/512px-WhatsApp.svg.png
+RUN curl -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -fsSL -o /usr/share/pixmaps/watsup.png https://cdn-icons-png.flaticon.com/512/124/124034.png
 
 # Create the defaults desktop folder if it doesn't exist and copy the desktop launcher
 # Also copy it to the system applications directory so it installs in the XFCE start menu!
