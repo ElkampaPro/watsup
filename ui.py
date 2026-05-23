@@ -19,7 +19,7 @@ class WatsUpUI:
     def __init__(self, root):
         self.root = root
         self.root.title("WatsUp Desktop Streamer")
-        self.root.geometry("580x560")
+        self.root.geometry("580x680")
         self.root.resizable(False, False)
         
         # Configure layout styling
@@ -75,6 +75,25 @@ class WatsUpUI:
                   
         style.configure('Browse.TButton', font=("Helvetica", 9, "bold"), padding=4, background="#4b5563", foreground="#ffffff", borderwidth=0)
         style.map('Browse.TButton', background=[('active', '#374151')])
+        
+        style.configure('Remove.TButton', font=("Helvetica", 9, "bold"), padding=4, background=self.danger_color, foreground="#ffffff", borderwidth=0)
+        style.map('Remove.TButton', background=[('active', '#dc2626'), ('disabled', '#4b5563')])
+
+        # Custom Treeview styles for the dark theme
+        style.configure("Treeview",
+                        background=self.card_color,
+                        foreground=self.text_color,
+                        rowheight=25,
+                        fieldbackground=self.card_color,
+                        borderwidth=0,
+                        font=("Helvetica", 9))
+        style.map("Treeview",
+                  background=[("selected", self.accent_color)],
+                  foreground=[("selected", "#ffffff")])
+        style.configure("Treeview.Heading",
+                        background="#374151",
+                        foreground=self.text_color,
+                        font=("Helvetica", 9, "bold"))
 
     def create_widgets(self):
         # 1. Main Header Branding
@@ -117,17 +136,43 @@ class WatsUpUI:
         self.recipient_combobox.bind("<KeyRelease>", self.filter_contacts)
         self.recipient_combobox.bind("<<ComboboxSelected>>", self.validate_inputs)
         
-        # Step 2: File Browser Picker
-        ttk.Label(inner_board, text="2. CHOOSE HEAVY FILE FOR LOCAL STREAMING (MAX 2GB)", style="Title.TLabel").pack(anchor="w")
+        # Step 2: Files Queue
+        ttk.Label(inner_board, text="2. FILES QUEUE (SELECT & MANAGE PIPELINE)", style="Title.TLabel").pack(anchor="w", pady=(0, 5))
         
-        file_picker_frame = tk.Frame(inner_board, background=self.card_color)
-        file_picker_frame.pack(fill="x", pady=8)
+        # Grid container for Treeview table and Action buttons
+        queue_container = tk.Frame(inner_board, background=self.card_color)
+        queue_container.pack(fill="x", pady=5)
         
-        self.browse_btn = ttk.Button(file_picker_frame, text="Browse File...", style="Browse.TButton", command=self.open_file_dialog)
+        # Treeview Scrollbar
+        scroll_y = ttk.Scrollbar(queue_container, orient="vertical")
+        
+        # Treeview Table
+        self.queue_tree = ttk.Treeview(queue_container, columns=("name", "size"), show="headings", height=4, yscrollcommand=scroll_y.set)
+        scroll_y.config(command=self.queue_tree.yview)
+        
+        self.queue_tree.heading("name", text="File Name")
+        self.queue_tree.heading("size", text="Size")
+        
+        self.queue_tree.column("name", width=340, anchor="w")
+        self.queue_tree.column("size", width=120, anchor="e")
+        
+        self.queue_tree.pack(side="left", fill="x", expand=True)
+        scroll_y.pack(side="left", fill="y")
+        
+        # Action Buttons container (Add / Remove)
+        action_btn_frame = tk.Frame(inner_board, background=self.card_color)
+        action_btn_frame.pack(fill="x", pady=(5, 15))
+        
+        self.browse_btn = ttk.Button(action_btn_frame, text="Add Files...", style="Browse.TButton", command=self.open_file_dialog)
         self.browse_btn.pack(side="left")
         
-        self.file_details_label = ttk.Label(file_picker_frame, text="No file selected.", style="CardLabel.TLabel", foreground="#9ca3af")
-        self.file_details_label.pack(side="left", padx=15, fill="x", expand=True)
+        self.remove_btn = ttk.Button(action_btn_frame, text="Remove Selected", style="Remove.TButton", state="disabled", command=self.remove_selected_file)
+        self.remove_btn.pack(side="left", padx=10)
+        
+        self.queue_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        
+        self.file_details_label = ttk.Label(action_btn_frame, text="0 files selected (0 Bytes)", style="CardLabel.TLabel", foreground="#9ca3af")
+        self.file_details_label.pack(side="right", padx=10)
         
         # Step 3: Trigger Button & Progress indicators
         self.send_btn = ttk.Button(inner_board, text="Send via local disk stream", state="disabled", command=self.initiate_transmission)
@@ -170,29 +215,62 @@ class WatsUpUI:
             title="Select Document(s)/Video(s) to Stream (Max 2GB per file)"
         )
         if file_paths:
-            self.selected_files = list(file_paths)
-            total_size = sum(os.path.getsize(fp) for fp in self.selected_files)
-            formatted_size = self.format_bytes(total_size)
+            # Append new selections to the queue
+            for fp in file_paths:
+                if fp not in self.selected_files:
+                    self.selected_files.append(fp)
+                    
+            self.refresh_queue_table()
+            self.log_message(f"Added {len(file_paths)} files to queue.")
             
-            if len(self.selected_files) == 1:
-                display_text = f"{os.path.basename(self.selected_files[0])} ({formatted_size})"
-            else:
-                display_text = f"{len(self.selected_files)} files selected ({formatted_size})"
-                
-            self.file_details_label.config(
-                text=display_text,
-                foreground=self.text_color
-            )
-            self.log_message(f"Selected {len(self.selected_files)} files to queue:")
-            for fp in self.selected_files:
-                self.log_message(f" - {os.path.basename(fp)} ({self.format_bytes(os.path.getsize(fp))})")
+        self.validate_inputs()
+
+    def on_tree_select(self, event):
+        selected = self.queue_tree.selection()
+        if selected:
+            self.remove_btn.config(state="normal")
         else:
-            self.selected_files = []
-            self.file_details_label.config(
-                text="No files selected.",
-                foreground="#9ca3af"
-            )
+            self.remove_btn.config(state="disabled")
+
+    def refresh_queue_table(self):
+        # Clear existing items
+        for item in self.queue_tree.get_children():
+            self.queue_tree.delete(item)
             
+        total_size = 0
+        # Populate table
+        for idx, fp in enumerate(self.selected_files):
+            file_name = os.path.basename(fp)
+            size_val = os.path.getsize(fp)
+            total_size += size_val
+            size_str = self.format_bytes(size_val)
+            
+            # Insert into Treeview
+            self.queue_tree.insert("", "end", iid=str(idx), values=(file_name, size_str))
+            
+        # Update summary label
+        formatted_total = self.format_bytes(total_size)
+        if len(self.selected_files) == 0:
+            self.file_details_label.config(text="0 files selected (0 Bytes)", foreground="#9ca3af")
+            self.remove_btn.config(state="disabled")
+        else:
+            self.file_details_label.config(text=f"{len(self.selected_files)} files selected ({formatted_total})", foreground=self.text_color)
+
+    def remove_selected_file(self):
+        selected_items = self.queue_tree.selection()
+        if not selected_items:
+            return
+            
+        # We process selected indexes in descending order to avoid shift issues
+        indexes_to_remove = sorted([int(item) for item in selected_items], reverse=True)
+        
+        for idx in indexes_to_remove:
+            if idx < len(self.selected_files):
+                removed_file = self.selected_files.pop(idx)
+                self.log_message(f"Removed from queue: {os.path.basename(removed_file)}")
+                
+        self.refresh_queue_table()
+        self.remove_btn.config(state="disabled")
         self.validate_inputs()
 
     def filter_contacts(self, event):
@@ -474,13 +552,13 @@ class WatsUpUI:
             messagebox.showinfo("Success", message, parent=self.root)
             # Reset UI files queue
             self.selected_files = []
-            self.file_details_label.config(text="No files selected.", foreground="#9ca3af")
+            self.refresh_queue_table()
         else:
             self.update_progress_ui(0, "Upload Failed!", "0%")
             messagebox.showerror("Error", message, parent=self.root)
             # Reset UI files queue on critical/all failures to be safe
             self.selected_files = []
-            self.file_details_label.config(text="No files selected.", foreground="#9ca3af")
+            self.refresh_queue_table()
             
         self.validate_inputs()
 
