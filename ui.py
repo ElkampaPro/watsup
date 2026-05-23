@@ -34,7 +34,7 @@ class WatsUpUI:
         
         # Application data states
         self.contacts_data = {}  # Map of display_name -> raw JID
-        self.selected_file_path = ""
+        self.selected_files = []
         self.connection_status = "offline"
         self.polling_active = True
         self.qr_popup = None
@@ -164,25 +164,32 @@ class WatsUpUI:
     # ==========================================
     
     def open_file_dialog(self):
-        # Open native Ubuntu file picker dialog
-        file_path = filedialog.askopenfilename(
+        # Open native Ubuntu file picker dialog (multiple selection enabled)
+        file_paths = filedialog.askopenfilenames(
             parent=self.root,
-            title="Select Document/Video to Stream (Max 2GB)"
+            title="Select Document(s)/Video(s) to Stream (Max 2GB per file)"
         )
-        if file_path:
-            self.selected_file_path = file_path
-            file_size_formatted = self.format_bytes(os.path.getsize(file_path))
-            file_name = os.path.basename(file_path)
+        if file_paths:
+            self.selected_files = list(file_paths)
+            total_size = sum(os.path.getsize(fp) for fp in self.selected_files)
+            formatted_size = self.format_bytes(total_size)
             
+            if len(self.selected_files) == 1:
+                display_text = f"{os.path.basename(self.selected_files[0])} ({formatted_size})"
+            else:
+                display_text = f"{len(self.selected_files)} files selected ({formatted_size})"
+                
             self.file_details_label.config(
-                text=f"{file_name} ({file_size_formatted})",
+                text=display_text,
                 foreground=self.text_color
             )
-            self.log_message(f"Selected file: {file_path}")
+            self.log_message(f"Selected {len(self.selected_files)} files to queue:")
+            for fp in self.selected_files:
+                self.log_message(f" - {os.path.basename(fp)} ({self.format_bytes(os.path.getsize(fp))})")
         else:
-            self.selected_file_path = ""
+            self.selected_files = []
             self.file_details_label.config(
-                text="No file selected.",
+                text="No files selected.",
                 foreground="#9ca3af"
             )
             
@@ -210,10 +217,10 @@ class WatsUpUI:
     def validate_inputs(self, event=None):
         recipient = self.recipient_var.get().strip()
         has_recipient = recipient != ""
-        has_file = self.selected_file_path != ""
+        has_files = len(self.selected_files) > 0
         is_connected = self.connection_status == "connected"
         
-        if has_recipient and has_file and is_connected:
+        if has_recipient and has_files and is_connected:
             self.send_btn.config(state="normal")
         else:
             self.send_btn.config(state="disabled")
@@ -415,22 +422,44 @@ class WatsUpUI:
         if not target_jid:
             self.root.after(0, self.post_transmission_ui, False, "Invalid recipient selected.")
             return
+
+        # Backup the list of files to process sequentially
+        files_to_send = list(self.selected_files)
+        total_files = len(files_to_send)
+        
+        self.log_message(f"Starting sequential transmission of {total_files} files...")
+        success_count = 0
+        
+        for index, filePath in enumerate(files_to_send):
+            if not os.path.exists(filePath):
+                self.log_message(f"File not found: {filePath}. Skipping...")
+                continue
+                
+            fileName = os.path.basename(filePath)
+            file_num_str = f"({index + 1}/{total_files})"
+            self.log_message(f"Streaming file {index + 1} of {total_files}: {fileName}...")
             
-        payload = {
-            "filePath": self.selected_file_path,
-            "recipient": target_jid
-        }
-        
-        self.log_message(f"Engine is streaming {os.path.basename(self.selected_file_path)}...")
-        
-        # Post request to engine API endpoint with a long timeout (30 mins) for heavy file streams
-        res = self.make_api_request("/api/send", data=payload, timeout=1800)
-        
-        if res.get("success", False):
-            self.root.after(0, self.post_transmission_ui, True, "File streamed and sent successfully!")
+            payload = {
+                "filePath": filePath,
+                "recipient": target_jid
+            }
+            
+            # Send file to engine API with safe long timeout (30 mins per file)
+            res = self.make_api_request("/api/send", data=payload, timeout=1800)
+            
+            if res.get("success", False):
+                success_count += 1
+                self.log_message(f"Successfully sent {file_num_str}: {fileName}")
+            else:
+                error_msg = res.get("error", "Unknown transmission error")
+                self.log_message(f"Failed to send {file_num_str}: {fileName}. Error: {error_msg}")
+                
+        if success_count == total_files:
+            self.root.after(0, self.post_transmission_ui, True, f"All {total_files} files streamed and sent successfully!")
+        elif success_count > 0:
+            self.root.after(0, self.post_transmission_ui, False, f"Queue completed with warnings: Sent {success_count} of {total_files} files successfully.")
         else:
-            error_msg = res.get("error", "Unknown transmission error")
-            self.root.after(0, self.post_transmission_ui, False, f"Upload Failed: {error_msg}")
+            self.root.after(0, self.post_transmission_ui, False, "All file transmissions in the queue failed.")
 
     def post_transmission_ui(self, success, message):
         self.send_btn.config(state="normal")
@@ -443,12 +472,15 @@ class WatsUpUI:
         if success:
             self.update_progress_ui(100, "Upload Completed Successfully!", "100%")
             messagebox.showinfo("Success", message, parent=self.root)
-            # Reset UI files selection
-            self.selected_file_path = ""
-            self.file_details_label.config(text="No file selected.", foreground="#9ca3af")
+            # Reset UI files queue
+            self.selected_files = []
+            self.file_details_label.config(text="No files selected.", foreground="#9ca3af")
         else:
             self.update_progress_ui(0, "Upload Failed!", "0%")
             messagebox.showerror("Error", message, parent=self.root)
+            # Reset UI files queue on critical/all failures to be safe
+            self.selected_files = []
+            self.file_details_label.config(text="No files selected.", foreground="#9ca3af")
             
         self.validate_inputs()
 
