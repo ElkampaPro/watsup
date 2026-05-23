@@ -388,7 +388,9 @@ app.post('/api/send', async (req, res) => {
 
     try {
         let lastLoggedPercent = -1;
-        const fileStream = fs.createReadStream(filePath);
+        // Use a highWaterMark of 1MB (1024 * 1024 bytes) to read from SSD/disk in large blocks.
+        // This significantly reduces disk I/O overhead and accelerates network upload speeds on high-speed VM links.
+        const fileStream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
         const progressStream = fileStream.pipe(new ProgressStream(totalBytes, (bytesRead, total, percentage) => {
             uploadProgress.bytesSent = bytesRead;
             uploadProgress.percentage = percentage;
