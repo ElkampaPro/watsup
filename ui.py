@@ -40,6 +40,7 @@ class WatsUpUI:
         self.qr_popup = None
         self.qr_photo = None
         self.upload_active = False
+        self.contacts_fetched = False
         
         # Custom TTK styles
         self.setup_styles()
@@ -356,14 +357,17 @@ class WatsUpUI:
                     if not self.upload_active:
                         self.root.after(0, self.update_progress_ui, 0, "Upload Progress: Idle", "0%")
                 
-                # If contacts map is empty, trigger a background sync fetch
-                if not self.contacts_data:
+                # Fetch contacts list immediately upon first connection transition
+                if not self.contacts_fetched:
+                    self.contacts_fetched = True
                     threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
             elif status == "connecting":
                 self.root.after(0, self.update_status_ui, "CONNECTING", "Establishing raw socket interfaces...", "Offline.TLabel")
                 self.root.after(0, self.close_qr_popup)
+                self.contacts_fetched = False
             else:
                 self.root.after(0, self.update_status_ui, "PAIRING REQUIRED", "Engine connected. Scan the QR code in the popup.", "Offline.TLabel")
+                self.contacts_fetched = False
                 if status_res.get("qrAvailable", False):
                     self.root.after(0, self.show_qr_popup)
                 else:
@@ -372,6 +376,7 @@ class WatsUpUI:
             # Engine server is offline entirely
             self.connection_status = "offline"
             self.contacts_data = {}
+            self.contacts_fetched = False
             self.root.after(0, self.update_status_ui, "ENGINE OFFLINE", "Run 'node engine.js' in your terminal SSH window.", "Offline.TLabel")
             self.root.after(0, self.clear_contacts_dropdown)
             self.root.after(0, self.close_qr_popup)
@@ -466,7 +471,9 @@ class WatsUpUI:
 
     def set_contacts_dropdown(self, values):
         self.recipient_combobox['values'] = values
-        self.log_message(f"Synced {len(values)} contacts successfully.")
+        # Only log to UI console if we actually have synced contacts, preventing spam
+        if len(values) > 0:
+            self.log_message(f"Synced {len(values)} contacts successfully.")
 
     # ==========================================
     # FILE SEND PIPELINE
