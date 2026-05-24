@@ -96,6 +96,15 @@ class WatsUpUI:
                         foreground=self.text_color,
                         font=("Helvetica", 9, "bold"))
 
+        # Custom Progressbar styling (Success emerald green)
+        style.configure("TProgressbar",
+                        troughcolor=self.card_color,
+                        background=self.success_color,
+                        thickness=12,
+                        lightcolor=self.success_color,
+                        darkcolor=self.success_color,
+                        borderwidth=0)
+
     def create_widgets(self):
         # 1. Main Header Branding
         header_frame = ttk.Frame(self.root)
