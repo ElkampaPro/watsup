@@ -522,7 +522,7 @@ class WatsUpUI:
     # ==========================================
 
     def initiate_transmission(self):
-        self.send_btn.config(state="disabled")
+        self.send_btn.config(state="disabled", text="Sending... Please wait")
         self.browse_btn.config(state="disabled")
         self.recipient_combobox.config(state="disabled")
         
@@ -676,6 +676,7 @@ class WatsUpUI:
             self.root.after(0, self.post_transmission_ui, False, "All file transmissions in the queue failed.")
 
     def post_transmission_ui(self, success, message):
+        self.send_btn.config(text="Send via local disk stream")
         self.send_btn.config(state="normal")
         self.browse_btn.config(state="normal")
         self.recipient_combobox.config(state="normal")
