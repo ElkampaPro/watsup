@@ -34,6 +34,12 @@ if ! python3 -c "import tkinter" &> /dev/null; then
     sudo apt-get update && sudo apt-get install -y python3-tk
 fi
 
+# Install rar CLI utility for authentic split RAR volumes
+if ! command -v rar &> /dev/null; then
+    echo "🔧 Installing RAR utility for authentic split RAR volumes..."
+    sudo apt-get update && sudo apt-get install -y rar
+fi
+
 # 2. Self-Installer: Install Node dependencies if missing
 if [ ! -d "node_modules" ]; then
     echo "📦 Installing Node.js application packages..."

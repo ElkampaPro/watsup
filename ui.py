@@ -545,7 +545,7 @@ class WatsUpUI:
 
     def show_splitting_banner(self, file_name, file_size):
         size_str = self.format_bytes(file_size)
-        self.splitting_banner.config(text=f" ⚠️  [Large File] Natively splitting '{file_name}' ({size_str}) into 1.95 GB parts... ")
+        self.splitting_banner.config(text=f" ⚠️  [Large File] Natively splitting '{file_name}' ({size_str}) into 1.95 GB RAR parts... ")
         self.splitting_banner.pack(side="top", fill="x", pady=(0, 10))
         self.update_progress_ui(0, f"Splitting: {file_name}...", "0%")
 
@@ -559,13 +559,38 @@ class WatsUpUI:
             return [filePath], False
             
         file_name = os.path.basename(filePath)
-        self.log_message(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({self.format_bytes(file_size)}) into 1.95 GB parts. Please wait, zero-CPU / zero-RAM active...")
+        self.log_message(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({self.format_bytes(file_size)}) into 1.95 GB RAR parts. Please wait, zero-CPU / zero-RAM active...")
         self.root.after(0, self.show_splitting_banner, file_name, file_size)
         
         # Create temp folder inside workspace
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watsup_temp_split")
         os.makedirs(temp_dir, exist_ok=True)
         
+        import shutil
+        import subprocess
+        rar_bin = shutil.which("rar")
+        
+        if rar_bin:
+            self.log_message(f"Using system RAR utility for authentic split RAR volumes (-m0 zero-compression)...")
+            archive_base = os.path.join(temp_dir, file_name)
+            # Run RAR command: rar a -m0 -v1950M {archive_base} {filePath}
+            cmd = [rar_bin, "a", "-m0", "-v1950M", archive_base, filePath]
+            try:
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=300)
+                
+                # Retrieve all generated part files (sorted alphabetically)
+                part_paths = []
+                for f in sorted(os.listdir(temp_dir)):
+                    if f.startswith(file_name) and f.endswith(".rar"):
+                        part_paths.append(os.path.join(temp_dir, f))
+                        
+                if part_paths:
+                    self.root.after(0, self.hide_splitting_banner)
+                    return part_paths, True
+            except Exception as e:
+                self.log_message(f"System RAR command failed: {str(e)}. Falling back to native binary splitter...")
+
+        # Fallback native binary splitter
         part_paths = []
         part_num = 1
         buffer_size = 10 * 1024 * 1024  # 10 MB buffer
@@ -573,7 +598,8 @@ class WatsUpUI:
         try:
             with open(filePath, 'rb') as f:
                 while True:
-                    part_name = f"{file_name}.zip.{part_num:03d}"
+                    # Name fallback files exactly as .part1.rar to match RAR volume conventions
+                    part_name = f"{file_name}.part{part_num}.rar"
                     part_path = os.path.join(temp_dir, part_name)
                     
                     bytes_written = 0
