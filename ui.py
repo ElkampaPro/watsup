@@ -59,25 +59,25 @@ class WatsUpUI:
         style.configure('TFrame', background=self.bg_color)
         style.configure('Card.TFrame', background=self.card_color, borderwidth=1, relief="solid")
         
-        style.configure('TLabel', background=self.bg_color, foreground=self.text_color, font=("Helvetica", 10))
-        style.configure('CardLabel.TLabel', background=self.card_color, foreground=self.text_color, font=("Helvetica", 10))
-        style.configure('Title.TLabel', background=self.card_color, foreground=self.text_color, font=("Helvetica", 13, "bold"))
-        style.configure('AppHeader.TLabel', background=self.bg_color, foreground="#818cf8", font=("Helvetica", 16, "bold"))
+        style.configure('TLabel', background=self.bg_color, foreground=self.text_color, font=("DejaVu Sans", 10))
+        style.configure('CardLabel.TLabel', background=self.card_color, foreground=self.text_color, font=("DejaVu Sans", 10))
+        style.configure('Title.TLabel', background=self.card_color, foreground=self.text_color, font=("DejaVu Sans", 12, "bold"))
+        style.configure('AppHeader.TLabel', background=self.bg_color, foreground="#818cf8", font=("DejaVu Sans", 15, "bold"))
         
         # Status configurations
-        style.configure('Offline.TLabel', background=self.card_color, foreground=self.danger_color, font=("Helvetica", 10, "bold"))
-        style.configure('Online.TLabel', background=self.card_color, foreground=self.success_color, font=("Helvetica", 10, "bold"))
+        style.configure('Offline.TLabel', background=self.card_color, foreground=self.danger_color, font=("DejaVu Sans", 10, "bold"))
+        style.configure('Online.TLabel', background=self.card_color, foreground=self.success_color, font=("DejaVu Sans", 10, "bold"))
         
         # Styled custom buttons
-        style.configure('TButton', font=("Helvetica", 10, "bold"), padding=6, background=self.accent_color, foreground="#ffffff", borderwidth=0)
+        style.configure('TButton', font=("DejaVu Sans", 10, "bold"), padding=6, background=self.accent_color, foreground="#ffffff", borderwidth=0)
         style.map('TButton',
                   background=[('active', '#9333ea'), ('disabled', '#4b5563')],
                   foreground=[('active', '#ffffff'), ('disabled', '#9ca3af')])
                   
-        style.configure('Browse.TButton', font=("Helvetica", 9, "bold"), padding=4, background="#4b5563", foreground="#ffffff", borderwidth=0)
+        style.configure('Browse.TButton', font=("DejaVu Sans", 9, "bold"), padding=4, background="#4b5563", foreground="#ffffff", borderwidth=0)
         style.map('Browse.TButton', background=[('active', '#374151')])
         
-        style.configure('Remove.TButton', font=("Helvetica", 9, "bold"), padding=4, background=self.danger_color, foreground="#ffffff", borderwidth=0)
+        style.configure('Remove.TButton', font=("DejaVu Sans", 9, "bold"), padding=4, background=self.danger_color, foreground="#ffffff", borderwidth=0)
         style.map('Remove.TButton', background=[('active', '#dc2626'), ('disabled', '#4b5563')])
 
         # Custom Treeview styles for the dark theme
@@ -87,14 +87,14 @@ class WatsUpUI:
                         rowheight=25,
                         fieldbackground=self.card_color,
                         borderwidth=0,
-                        font=("Helvetica", 9))
+                        font=("DejaVu Sans", 9))
         style.map("Treeview",
                   background=[("selected", self.accent_color)],
                   foreground=[("selected", "#ffffff")])
         style.configure("Treeview.Heading",
                         background="#374151",
                         foreground=self.text_color,
-                        font=("Helvetica", 9, "bold"))
+                        font=("DejaVu Sans", 9, "bold"))
 
         # Custom Progressbar styling (Success emerald green)
         style.configure("TProgressbar",
@@ -113,7 +113,7 @@ class WatsUpUI:
         header_label = ttk.Label(header_frame, text=" WatsUp Desktop Streamer", style="AppHeader.TLabel")
         header_label.pack(side="left")
         
-        sub_label = ttk.Label(header_frame, text="Ubuntu RDP Pipeline", foreground="#9ca3af", font=("Helvetica", 9, "italic"))
+        sub_label = ttk.Label(header_frame, text="Ubuntu RDP Pipeline", foreground="#9ca3af", font=("DejaVu Sans", 9, "italic"))
         sub_label.pack(side="right", pady=5)
 
         # 2. Connection Status Card
@@ -141,7 +141,7 @@ class WatsUpUI:
         ttk.Label(inner_board, text="1. CHOOSE RECIPIENT OR MANUAL NUMBER", style="Title.TLabel").pack(anchor="w")
         
         self.recipient_var = tk.StringVar()
-        self.recipient_combobox = ttk.Combobox(inner_board, textvariable=self.recipient_var, font=("Helvetica", 10))
+        self.recipient_combobox = ttk.Combobox(inner_board, textvariable=self.recipient_var, font=("DejaVu Sans", 10))
         self.recipient_combobox.pack(fill="x", pady=(8, 20))
         self.recipient_combobox.bind("<KeyRelease>", self.filter_contacts)
         self.recipient_combobox.bind("<<ComboboxSelected>>", self.validate_inputs)
@@ -212,7 +212,7 @@ class WatsUpUI:
         self.logger_box.pack(fill="x")
         
         # Footer watermark
-        ttk.Label(self.root, text="Zero-Browser Engine Core  •  Flat RAM Pipeline", foreground="#6b7280", font=("Helvetica", 8)).pack(side="bottom", pady=10)
+        ttk.Label(self.root, text="Zero-Browser Engine Core  •  Flat RAM Pipeline", foreground="#6b7280", font=("DejaVu Sans", 8)).pack(side="bottom", pady=10)
 
     # ==========================================
     # INPUT ACTIONS & HANDLERS
@@ -332,7 +332,9 @@ class WatsUpUI:
                 sleep_time = 0.5
             else:
                 sleep_time = 2.0
-                if self.connection_status == "connected" and counter % 5 == 0:
+                # Only poll contacts list if we are connected AND the list is currently empty.
+                # Once we successfully fetch the groups/contacts catalog, polling stops entirely!
+                if self.connection_status == "connected" and len(self.contacts_data) == 0 and counter % 5 == 0:
                     threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
             time.sleep(sleep_time)
 
@@ -470,9 +472,13 @@ class WatsUpUI:
             
             for contact in contacts_res:
                 if contact and "id" in contact and "name" in contact:
-                    jid_number = contact["id"].split("@")[0]
-                    display = f"{contact['name']} (+{jid_number})"
-                    temp_map[display] = contact["id"]
+                    jid = contact["id"]
+                    name = contact["name"]
+                    jid_number = jid.split("@")[0]
+                    
+                    # Use Right-to-Left Mark (\u200f) to isolate LTR bracket numbers from RTL Arabic characters
+                    display = f"{name} \u200f(+{jid_number})"
+                    temp_map[display] = jid
                     dropdown_values.append(display)
             
             self.contacts_data = temp_map
