@@ -354,6 +354,10 @@ class WatsUpUI:
                 self.root.after(0, self.update_status_ui, "CONNECTED", f"Linked Device: +{user_id} ({user_name})", "Online.TLabel")
                 self.root.after(0, self.close_qr_popup)
                 
+                # Pre-populate self-chat contact immediately upon connection transition
+                if user_id and user_id != "Session" and not self.contacts_data:
+                    self.root.after(0, self.setup_default_self_contact, user_id)
+                
                 # Check dynamic upload progress
                 upload_progress = status_res.get("uploadProgress", {})
                 if upload_progress.get("active", False):
@@ -484,11 +488,34 @@ class WatsUpUI:
             self.contacts_data = temp_map
             self.root.after(0, self.set_contacts_dropdown, dropdown_values)
 
+    def setup_default_self_contact(self, user_id):
+        display = f"👤 [Me] Chat with Yourself \u200f(+{user_id})"
+        jid = f"{user_id}@s.whatsapp.net"
+        if display not in self.contacts_data:
+            self.contacts_data[display] = jid
+            current_values = list(self.recipient_combobox['values'])
+            if display not in current_values:
+                current_values.insert(0, display)
+                self.recipient_combobox['values'] = current_values
+            
+            if not self.recipient_var.get().strip():
+                self.recipient_var.set(display)
+                self.validate_inputs()
+
     def set_contacts_dropdown(self, values):
         self.recipient_combobox['values'] = values
         # Only log to UI console if we actually have synced contacts, preventing spam
         if len(values) > 0:
             self.log_message(f"Synced {len(values)} contacts successfully.")
+            
+            # Default recipient selection to user's own number/self-chat contact
+            current = self.recipient_var.get().strip()
+            if not current or "[Me]" in current or "Chat with Yourself" in current:
+                for val in values:
+                    if "[Me]" in val or "Chat with Yourself" in val:
+                        self.recipient_var.set(val)
+                        self.validate_inputs()
+                        break
 
     # ==========================================
     # FILE SEND PIPELINE

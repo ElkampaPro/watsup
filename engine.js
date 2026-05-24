@@ -370,7 +370,22 @@ app.get('/api/contacts', async (req, res) => {
     fetchGroupsList().catch(() => {});
     
     const list = Array.from(contactsMap.values());
+    
+    // Sort standard contacts alphabetically first
     list.sort((a, b) => a.name.localeCompare(b.name));
+    
+    // Dynamically PREPEND the connected user's own number to the top of the contacts list
+    // This guarantees the self-chat option appears at the very top of the dropdown!
+    if (sock && sock.user && sock.user.id) {
+        const myNumber = sock.user.id.split(':')[0];
+        const myJid = `${myNumber}@s.whatsapp.net`;
+        
+        list.unshift({
+            id: myJid,
+            name: '👤 [Me] Chat with Yourself'
+        });
+    }
+    
     res.json(list);
 });
 
