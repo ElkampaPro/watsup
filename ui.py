@@ -192,6 +192,17 @@ class WatsUpUI:
         self.progress_frame = tk.Frame(inner_board, background=self.card_color)
         self.progress_frame.pack(fill="x", pady=(0, 15))
         
+        # Dynamic golden-yellow splitting notification banner (hidden by default)
+        self.splitting_banner = tk.Label(
+            self.progress_frame,
+            text="",
+            bg="#eab308",  # Premium amber/yellow
+            fg="#111827",  # Deep dark contrast text
+            font=("DejaVu Sans", 9, "bold"),
+            pady=6,
+            relief="flat"
+        )
+        
         # Row 1 of progress panel: Labels side-by-side
         labels_row = tk.Frame(self.progress_frame, background=self.card_color)
         labels_row.pack(fill="x", pady=(0, 5))
@@ -532,6 +543,15 @@ class WatsUpUI:
         # Execute the transmission worker on a background thread so Tkinter remains completely responsive
         threading.Thread(target=self.transmission_worker, daemon=True).start()
 
+    def show_splitting_banner(self, file_name, file_size):
+        size_str = self.format_bytes(file_size)
+        self.splitting_banner.config(text=f" ⚠️  [Large File] Natively splitting '{file_name}' ({size_str}) into 1.95 GB parts... ")
+        self.splitting_banner.pack(side="top", fill="x", pady=(0, 10))
+        self.update_progress_ui(0, f"Splitting: {file_name}...", "0%")
+
+    def hide_splitting_banner(self):
+        self.splitting_banner.pack_forget()
+
     def split_large_file(self, filePath):
         file_size = os.path.getsize(filePath)
         limit = 1950 * 1024 * 1024  # 1.95 GB (Maximum safe limit close to 2GB WhatsApp threshold)
@@ -540,7 +560,7 @@ class WatsUpUI:
             
         file_name = os.path.basename(filePath)
         self.log_message(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({self.format_bytes(file_size)}) into 1.95 GB parts. Please wait, zero-CPU / zero-RAM active...")
-        self.root.after(0, self.update_progress_ui, 0, f"Splitting: {file_name}...", "0%")
+        self.root.after(0, self.show_splitting_banner, file_name, file_size)
         
         # Create temp folder inside workspace
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watsup_temp_split")
@@ -576,8 +596,10 @@ class WatsUpUI:
                     self.log_message(f"Created part {part_num}: {part_name} ({self.format_bytes(bytes_written)})")
                     part_num += 1
             
+            self.root.after(0, self.hide_splitting_banner)
             return part_paths, True
         except Exception as e:
+            self.root.after(0, self.hide_splitting_banner)
             self.log_message(f"Error splitting file '{file_name}': {str(e)}")
             # Cleanup any partially written files
             for p in part_paths:
