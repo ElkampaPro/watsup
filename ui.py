@@ -532,6 +532,59 @@ class WatsUpUI:
         # Execute the transmission worker on a background thread so Tkinter remains completely responsive
         threading.Thread(target=self.transmission_worker, daemon=True).start()
 
+    def split_large_file(self, filePath):
+        file_size = os.path.getsize(filePath)
+        limit = 1900 * 1024 * 1024  # 1.9 GB
+        if file_size <= limit:
+            return [filePath], False
+            
+        file_name = os.path.basename(filePath)
+        self.log_message(f"File '{file_name}' ({self.format_bytes(file_size)}) exceeds 1.9 GB limit. Splitting into spanned ZIP parts natively...")
+        
+        # Create temp folder inside workspace
+        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watsup_temp_split")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        part_paths = []
+        part_num = 1
+        buffer_size = 10 * 1024 * 1024  # 10 MB buffer
+        
+        try:
+            with open(filePath, 'rb') as f:
+                while True:
+                    part_name = f"{file_name}.zip.{part_num:03d}"
+                    part_path = os.path.join(temp_dir, part_name)
+                    
+                    bytes_written = 0
+                    with open(part_path, 'wb') as out_f:
+                        while bytes_written < limit:
+                            read_len = min(buffer_size, limit - bytes_written)
+                            chunk = f.read(read_len)
+                            if not chunk:
+                                break
+                            out_f.write(chunk)
+                            bytes_written += len(chunk)
+                            
+                    if bytes_written == 0:
+                        # Clean up the empty part file we created at EOF
+                        if os.path.exists(part_path):
+                            os.remove(part_path)
+                        break
+                        
+                    part_paths.append(part_path)
+                    self.log_message(f"Created part {part_num}: {part_name} ({self.format_bytes(bytes_written)})")
+                    part_num += 1
+            
+            return part_paths, True
+        except Exception as e:
+            self.log_message(f"Error splitting file '{file_name}': {str(e)}")
+            # Cleanup any partially written files
+            for p in part_paths:
+                if os.path.exists(p):
+                    try: os.remove(p)
+                    except: pass
+            raise e
+
     def transmission_worker(self):
         recipient = self.recipient_var.get().strip()
         target_jid = ""
@@ -564,22 +617,55 @@ class WatsUpUI:
                 
             fileName = os.path.basename(filePath)
             file_num_str = f"({index + 1}/{total_files})"
-            self.log_message(f"Streaming file {index + 1} of {total_files}: {fileName}...")
             
-            payload = {
-                "filePath": filePath,
-                "recipient": target_jid
-            }
+            # Check size and split if needed
+            try:
+                paths_to_send, is_split = self.split_large_file(filePath)
+            except Exception as e:
+                self.log_message(f"Skipping '{fileName}' due to splitting failure.")
+                continue
+                
+            split_success = True
+            for part_idx, path in enumerate(paths_to_send):
+                partName = os.path.basename(path)
+                if is_split:
+                    part_str = f" [Part {part_idx + 1}/{len(paths_to_send)}]"
+                    self.log_message(f"Streaming file {index + 1} of {total_files}{part_str}: {partName}...")
+                else:
+                    self.log_message(f"Streaming file {index + 1} of {total_files}: {fileName}...")
+                
+                payload = {
+                    "filePath": path,
+                    "recipient": target_jid
+                }
+                
+                # Send file to engine API with safe long timeout (30 mins per file)
+                res = self.make_api_request("/api/send", data=payload, timeout=1800)
+                
+                if not res.get("success", False):
+                    error_msg = res.get("error", "Unknown transmission error")
+                    self.log_message(f"Failed to send {partName}. Error: {error_msg}")
+                    split_success = False
+                    break
             
-            # Send file to engine API with safe long timeout (30 mins per file)
-            res = self.make_api_request("/api/send", data=payload, timeout=1800)
+            # Clean up temporary split files if we generated them
+            if is_split:
+                self.log_message(f"Cleaning up temporary split parts for '{fileName}'...")
+                for path in paths_to_send:
+                    if os.path.exists(path):
+                        try: os.remove(path)
+                        except: pass
+                # Try to remove the temp folder if it is empty
+                temp_dir = os.path.dirname(paths_to_send[0])
+                if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                    try: os.rmdir(temp_dir)
+                    except: pass
             
-            if res.get("success", False):
+            if split_success:
                 success_count += 1
                 self.log_message(f"Successfully sent {file_num_str}: {fileName}")
             else:
-                error_msg = res.get("error", "Unknown transmission error")
-                self.log_message(f"Failed to send {file_num_str}: {fileName}. Error: {error_msg}")
+                self.log_message(f"Failed to send {file_num_str}: {fileName}")
                 
         if success_count == total_files:
             self.root.after(0, self.post_transmission_ui, True, f"All {total_files} files streamed and sent successfully!")
