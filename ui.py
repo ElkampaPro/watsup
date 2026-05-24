@@ -573,8 +573,8 @@ class WatsUpUI:
         if rar_bin:
             self.log_message(f"Using system RAR utility for authentic split RAR volumes (-m0 zero-compression)...")
             archive_base = os.path.join(temp_dir, file_name)
-            # Run RAR command: rar a -m0 -v1950M {archive_base} {filePath}
-            cmd = [rar_bin, "a", "-m0", "-v1950M", archive_base, filePath]
+            # Run RAR command: rar a -m0 -v1950M -y {archive_base} {filePath}
+            cmd = [rar_bin, "a", "-m0", "-v1950M", "-y", archive_base, filePath]
             try:
                 subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=300)
                 
