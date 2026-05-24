@@ -250,6 +250,11 @@ async function connectToWhatsApp() {
             connectionState.userInfo = sock.user;
             connectionState.qrAvailable = false;
 
+            // Trigger dynamic group sync immediately on login
+            // We temporarily bypass throttle to ensure fresh sync on startup
+            lastGroupSyncTime = 0;
+            fetchGroupsList().catch(() => {});
+            
             // Delete qr.png if it exists
             const qrFile = path.join(__dirname, 'qr.png');
             if (fs.existsSync(qrFile)) {
@@ -264,13 +269,17 @@ async function connectToWhatsApp() {
         let updated = false;
         for (const contact of contacts) {
             if (contact && contact.id) {
-                const name = contact.name || contact.notify || contact.verifiedName || null;
-                if (name) {
-                    contactsMap.set(contact.id, { id: contact.id, name });
+                // Ignore groups in standard contacts catalog syncing to avoid duplicate styling
+                if (contact.id.endsWith('@g.us')) continue;
+                
+                const rawName = contact.name || contact.notify || contact.verifiedName || null;
+                if (rawName) {
+                    const nameWithPrefix = rawName.startsWith('👤 ') ? rawName : `👤 ${rawName}`;
+                    contactsMap.set(contact.id, { id: contact.id, name: nameWithPrefix });
                     updated = true;
                 } else if (!contactsMap.has(contact.id)) {
                     const digits = contact.id.split('@')[0];
-                    contactsMap.set(contact.id, { id: contact.id, name: `+${digits}` });
+                    contactsMap.set(contact.id, { id: contact.id, name: `👤 +${digits}` });
                     updated = true;
                 }
             }
@@ -278,9 +287,25 @@ async function connectToWhatsApp() {
         if (updated) saveContactsCache();
     };
 
-    sock.ev.on('messaging-history.set', ({ contacts }) => {
-        console.log('[Baileys] History synced. Parsing contacts...');
+    sock.ev.on('messaging-history.set', ({ contacts, chats }) => {
+        console.log('[Baileys] History synced. Parsing contacts and chats...');
         cacheContacts(contacts);
+        
+        if (chats) {
+            let updated = false;
+            for (const chat of chats) {
+                if (chat && chat.id && !contactsMap.has(chat.id)) {
+                    const isGroup = chat.id.endsWith('@g.us');
+                    const prefix = isGroup ? '👥 [Group] ' : '👤 ';
+                    const rawName = chat.name || chat.notify || (isGroup ? 'Unnamed Group' : `+${chat.id.split('@')[0]}`);
+                    const nameWithPrefix = rawName.startsWith(prefix) ? rawName : `${prefix}${rawName}`;
+                    
+                    contactsMap.set(chat.id, { id: chat.id, name: nameWithPrefix });
+                    updated = true;
+                }
+            }
+            if (updated) saveContactsCache();
+        }
     });
 
     sock.ev.on('contacts.upsert', (contacts) => {
@@ -290,6 +315,33 @@ async function connectToWhatsApp() {
     sock.ev.on('contacts.update', (contacts) => {
         cacheContacts(contacts);
     });
+}
+
+let lastGroupSyncTime = 0;
+async function fetchGroupsList() {
+    if (!sock || connectionState.status !== 'connected') return;
+    const now = Date.now();
+    // Throttle group syncs to at most once every 60 seconds to prevent WhatsApp API rate limiting
+    if (now - lastGroupSyncTime < 60000) return;
+    
+    try {
+        console.log('[Engine] Syncing WhatsApp groups list from server...');
+        const groups = await sock.groupFetchAllParticipating();
+        let updated = false;
+        for (const jid in groups) {
+            const group = groups[jid];
+            const name = `👥 [Group] ${group.subject}`;
+            contactsMap.set(jid, { id: jid, name });
+            updated = true;
+        }
+        if (updated) {
+            saveContactsCache();
+            console.log(`[Engine] Synced ${Object.keys(groups).length} WhatsApp groups successfully.`);
+        }
+        lastGroupSyncTime = now;
+    } catch (err) {
+        console.error('[Engine] Error syncing WhatsApp groups list:', err);
+    }
 }
 
 // Load cache and run core WebSocket
@@ -313,7 +365,10 @@ app.get('/api/status', (req, res) => {
 /**
  * Returns sorted list of synced contacts
  */
-app.get('/api/contacts', (req, res) => {
+app.get('/api/contacts', async (req, res) => {
+    // Run group sync asynchronously in background (throttled)
+    fetchGroupsList().catch(() => {});
+    
     const list = Array.from(contactsMap.values());
     list.sort((a, b) => a.name.localeCompare(b.name));
     res.json(list);
