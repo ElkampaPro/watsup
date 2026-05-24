@@ -534,12 +534,13 @@ class WatsUpUI:
 
     def split_large_file(self, filePath):
         file_size = os.path.getsize(filePath)
-        limit = 1900 * 1024 * 1024  # 1.9 GB
+        limit = 1950 * 1024 * 1024  # 1.95 GB (Maximum safe limit close to 2GB WhatsApp threshold)
         if file_size <= limit:
             return [filePath], False
             
         file_name = os.path.basename(filePath)
-        self.log_message(f"File '{file_name}' ({self.format_bytes(file_size)}) exceeds 1.9 GB limit. Splitting into spanned ZIP parts natively...")
+        self.log_message(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({self.format_bytes(file_size)}) into 1.95 GB parts. Please wait, zero-CPU / zero-RAM active...")
+        self.root.after(0, self.update_progress_ui, 0, f"Splitting: {file_name}...", "0%")
         
         # Create temp folder inside workspace
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watsup_temp_split")
