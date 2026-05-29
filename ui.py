@@ -343,9 +343,9 @@ class WatsUpUI:
                 sleep_time = 0.5
             else:
                 sleep_time = 2.0
-                # Only poll contacts list if we are connected AND the list is currently empty.
+                # Only poll contacts list if we are connected AND the list has not been successfully fetched yet.
                 # Once we successfully fetch the groups/contacts catalog, polling stops entirely!
-                if self.connection_status == "connected" and len(self.contacts_data) == 0 and counter % 5 == 0:
+                if self.connection_status == "connected" and not self.contacts_fetched and counter % 5 == 0:
                     threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
             time.sleep(sleep_time)
 
@@ -385,7 +385,6 @@ class WatsUpUI:
                 
                 # Fetch contacts list immediately upon first connection transition
                 if not self.contacts_fetched:
-                    self.contacts_fetched = True
                     threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
             elif status == "connecting":
                 self.root.after(0, self.update_status_ui, "CONNECTING", "Establishing raw socket interfaces...", "Offline.TLabel")
@@ -498,6 +497,8 @@ class WatsUpUI:
             
             self.contacts_data = temp_map
             self.root.after(0, self.set_contacts_dropdown, dropdown_values)
+            if len(dropdown_values) > 1:
+                self.contacts_fetched = True
 
     def setup_default_self_contact(self, user_id):
         display = f"👤 [Me] Chat with Yourself \u200f(+{user_id})"

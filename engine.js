@@ -321,8 +321,9 @@ let lastGroupSyncTime = 0;
 async function fetchGroupsList() {
     if (!sock || connectionState.status !== 'connected') return;
     const now = Date.now();
-    // Throttle group syncs to at most once every 60 seconds to prevent WhatsApp API rate limiting
-    if (now - lastGroupSyncTime < 60000) return;
+    // Throttle group syncs to at most once every 60 seconds, unless we have no groups in cache yet
+    const hasGroups = Array.from(contactsMap.keys()).some(k => k.endsWith('@g.us'));
+    if (hasGroups && (now - lastGroupSyncTime < 60000)) return;
     
     try {
         console.log('[Engine] Syncing WhatsApp groups list from server...');
