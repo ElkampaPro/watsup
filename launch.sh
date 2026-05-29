@@ -11,18 +11,32 @@ echo " 🚀 WatsUp Desktop Streamer - Smart Installer & Launcher"
 echo "=========================================================="
 echo ""
 
+# 0. Fix permissions if the app directory is owned by root or not writable by current user
+SUDO=""
+if command -v sudo &> /dev/null; then
+    SUDO="sudo"
+fi
+
+if [ ! -w "$APP_DIR" ]; then
+    echo "🔧 App directory is not writable by the current user ($(whoami))."
+    echo "🔑 Fixing permissions using $SUDO..."
+    $SUDO chown -R "$(id -u):$(id -g)" "$APP_DIR" 2>/dev/null || $SUDO chmod -R 777 "$APP_DIR" 2>/dev/null
+    echo "✅ Permissions fixed successfully!"
+    echo "----------------------------------------------------------"
+fi
+
 # 1. Self-Installer: Detect and install Node.js and system libraries if missing
 if ! command -v node &> /dev/null; then
     echo "🔧 First-time run: Node.js was not detected."
-    echo "📦 Installing Node.js and required libraries (requires sudo)..."
+    echo "📦 Installing Node.js and required libraries..."
     
     # Update packages and install dependencies
-    sudo apt-get update
-    sudo apt-get install -y --no-install-recommends curl gnupg lsof python3 python3-tk python3-pip
+    $SUDO apt-get update
+    $SUDO apt-get install -y --no-install-recommends curl gnupg lsof python3 python3-tk python3-pip
     
     # Install Node.js v20 LTS from NodeSource
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    sudo apt-get install -y --no-install-recommends nodejs
+    curl -fsSL https://deb.nodesource.com/setup_20.x | $SUDO -E bash -
+    $SUDO apt-get install -y --no-install-recommends nodejs
     
     echo "✅ System dependencies installed successfully!"
     echo "----------------------------------------------------------"
@@ -31,13 +45,13 @@ fi
 # Double check python3-tk installation
 if ! python3 -c "import tkinter" &> /dev/null; then
     echo "🔧 Installing Python Tkinter library..."
-    sudo apt-get update && sudo apt-get install -y python3-tk
+    $SUDO apt-get update && $SUDO apt-get install -y python3-tk
 fi
 
 # Install rar CLI utility for authentic split RAR volumes
 if ! command -v rar &> /dev/null; then
     echo "🔧 Installing RAR utility for authentic split RAR volumes..."
-    sudo apt-get update && sudo apt-get install -y rar
+    $SUDO apt-get update && $SUDO apt-get install -y rar
 fi
 
 # 2. Self-Installer: Install Node dependencies if missing
