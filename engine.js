@@ -47,7 +47,8 @@ let sock = null;
 let connectionState = {
     status: 'disconnected', // 'disconnected' | 'connecting' | 'connected'
     userInfo: null,          // Logged-in WhatsApp details
-    qrAvailable: false
+    qrAvailable: false,
+    groupsSynced: false
 };
 
 let uploadProgress = {
@@ -227,6 +228,7 @@ async function connectToWhatsApp() {
             connectionState.status = 'disconnected';
             connectionState.userInfo = null;
             connectionState.qrAvailable = false;
+            connectionState.groupsSynced = false;
 
             // Delete qr.png if it exists
             const qrFile = path.join(__dirname, 'qr.png');
@@ -249,6 +251,7 @@ async function connectToWhatsApp() {
             connectionState.status = 'connected';
             connectionState.userInfo = sock.user;
             connectionState.qrAvailable = false;
+            connectionState.groupsSynced = false;
 
             // Trigger dynamic group sync immediately on login
             // We temporarily bypass throttle to ensure fresh sync on startup
@@ -323,7 +326,10 @@ async function fetchGroupsList() {
     const now = Date.now();
     // Throttle group syncs to at most once every 60 seconds, unless we have no groups in cache yet
     const hasGroups = Array.from(contactsMap.keys()).some(k => k.endsWith('@g.us'));
-    if (hasGroups && (now - lastGroupSyncTime < 60000)) return;
+    if (hasGroups && (now - lastGroupSyncTime < 60000)) {
+        connectionState.groupsSynced = true;
+        return;
+    }
     
     try {
         console.log('[Engine] Syncing WhatsApp groups list from server...');
@@ -340,8 +346,10 @@ async function fetchGroupsList() {
             console.log(`[Engine] Synced ${Object.keys(groups).length} WhatsApp groups successfully.`);
         }
         lastGroupSyncTime = now;
+        connectionState.groupsSynced = true;
     } catch (err) {
         console.error('[Engine] Error syncing WhatsApp groups list:', err);
+        connectionState.groupsSynced = true;
     }
 }
 
@@ -400,12 +408,12 @@ app.post('/api/logout', async (req, res) => {
             await sock.logout();
         }
         deleteAuthFolder();
-        connectionState = { status: 'disconnected', userInfo: null };
+        connectionState = { status: 'disconnected', userInfo: null, qrAvailable: false, groupsSynced: false };
         res.json({ success: true, message: 'Logged out successfully.' });
     } catch (err) {
         console.error('[Server] Error handling clean logout:', err);
         deleteAuthFolder();
-        connectionState = { status: 'disconnected', userInfo: null };
+        connectionState = { status: 'disconnected', userInfo: null, qrAvailable: false, groupsSynced: false };
         res.json({ success: true, message: 'Forced session wipe completed.' });
     }
 });

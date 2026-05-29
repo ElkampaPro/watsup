@@ -383,6 +383,11 @@ class WatsUpUI:
                     if not self.upload_active:
                         self.root.after(0, self.update_progress_ui, 0, "Upload Progress: Idle", "0%")
                 
+                # Use engine's groupsSynced flag to know exactly when to stop polling contacts
+                groups_synced = status_res.get("groupsSynced", False)
+                if groups_synced and len(self.recipient_combobox['values']) > 1:
+                    self.contacts_fetched = True
+
                 # Fetch contacts list immediately upon first connection transition
                 if not self.contacts_fetched:
                     threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
@@ -495,10 +500,11 @@ class WatsUpUI:
                     temp_map[display] = jid
                     dropdown_values.append(display)
             
-            self.contacts_data = temp_map
-            self.root.after(0, self.set_contacts_dropdown, dropdown_values)
-            if len(dropdown_values) > 1:
-                self.contacts_fetched = True
+            # Check if the values actually changed to prevent dropdown reset spam
+            current_values = list(self.recipient_combobox['values'])
+            if current_values != dropdown_values:
+                self.contacts_data = temp_map
+                self.root.after(0, self.set_contacts_dropdown, dropdown_values)
 
     def setup_default_self_contact(self, user_id):
         display = f"👤 [Me] Chat with Yourself \u200f(+{user_id})"
