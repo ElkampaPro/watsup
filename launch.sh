@@ -125,7 +125,14 @@ if [ -n "$ENGINE_PID" ]; then
 fi
 
 echo "🎨 Starting dark-themed UI dashboard..."
-python3 ui.py
+python3 ui.py 2> ui_error.log
+PYTHON_EXIT_CODE=$?
+
+if [ $PYTHON_EXIT_CODE -ne 0 ]; then
+    echo "❌ Python GUI crashed with exit code $PYTHON_EXIT_CODE."
+    echo "📋 Error details (from ui_error.log):"
+    cat ui_error.log
+fi
 
 echo ""
 echo "🧹 Shutting down WatsUp Streamer..."
