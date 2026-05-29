@@ -186,7 +186,9 @@ async function connectToWhatsApp() {
         // Mimic an Android tablet / desktop on Linux for optimal and fast upload limits
         browser: ['Linux', 'Chrome', '120.0.0.0'],
         printQRInTerminal: false, // We will custom print this to avoid overflow
-        syncFullHistory: false    // Do not sync history to conserve system RAM
+        syncFullHistory: false,   // Do not sync history to conserve system RAM
+        connectTimeoutMs: 60000,  // Increase connect timeout to 60s
+        defaultQueryTimeoutMs: 90000 // Increase query timeout to 90s to avoid init queries timeout
     });
 
     sock.ev.on('creds.update', saveCreds);
