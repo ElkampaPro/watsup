@@ -41,6 +41,7 @@ class WatsUpUI:
         self.qr_photo = None
         self.upload_active = False
         self.contacts_fetched = False
+        self.groups_synced = False
         
         # Custom TTK styles
         self.setup_styles()
@@ -382,12 +383,10 @@ class WatsUpUI:
                 else:
                     if not self.upload_active:
                         self.root.after(0, self.update_progress_ui, 0, "Upload Progress: Idle", "0%")
-                
-                # Use engine's groupsSynced flag to know exactly when to stop polling contacts
+                               # Use engine's groupsSynced flag to know exactly when to stop polling contacts
                 groups_synced = status_res.get("groupsSynced", False)
-                if groups_synced and len(self.contacts_data) >= 1:
-                    self.contacts_fetched = True
-
+                self.groups_synced = groups_synced
+ 
                 # Fetch contacts list immediately upon first connection transition
                 if not self.contacts_fetched:
                     threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
@@ -395,9 +394,11 @@ class WatsUpUI:
                 self.root.after(0, self.update_status_ui, "CONNECTING", "Establishing raw socket interfaces...", "Offline.TLabel")
                 self.root.after(0, self.close_qr_popup)
                 self.contacts_fetched = False
+                self.groups_synced = False
             else:
                 self.root.after(0, self.update_status_ui, "PAIRING REQUIRED", "Engine connected. Scan the QR code in the popup.", "Offline.TLabel")
                 self.contacts_fetched = False
+                self.groups_synced = False
                 if status_res.get("qrAvailable", False):
                     self.root.after(0, self.show_qr_popup)
                 else:
@@ -407,6 +408,7 @@ class WatsUpUI:
             self.connection_status = "offline"
             self.contacts_data = {}
             self.contacts_fetched = False
+            self.groups_synced = False
             self.root.after(0, self.update_status_ui, "ENGINE OFFLINE", "Run 'node engine.js' in your terminal SSH window.", "Offline.TLabel")
             self.root.after(0, self.clear_contacts_dropdown)
             self.root.after(0, self.close_qr_popup)
@@ -504,6 +506,11 @@ class WatsUpUI:
             if set(self.contacts_data.keys()) != set(temp_map.keys()):
                 self.contacts_data = temp_map
                 self.root.after(0, self.set_contacts_dropdown, dropdown_values)
+                
+            # If the engine has completed group sync, we mark contacts as fully fetched
+            # to stop future polling of this endpoint.
+            if self.groups_synced:
+                self.contacts_fetched = True
 
     def setup_default_self_contact(self, user_id):
         display = f"👤 [Me] Chat with Yourself \u200f(+{user_id})"
