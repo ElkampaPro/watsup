@@ -385,7 +385,7 @@ class WatsUpUI:
                 
                 # Use engine's groupsSynced flag to know exactly when to stop polling contacts
                 groups_synced = status_res.get("groupsSynced", False)
-                if groups_synced and len(self.recipient_combobox['values']) > 1:
+                if groups_synced and len(self.contacts_data) >= 1:
                     self.contacts_fetched = True
 
                 # Fetch contacts list immediately upon first connection transition
@@ -501,8 +501,7 @@ class WatsUpUI:
                     dropdown_values.append(display)
             
             # Check if the values actually changed to prevent dropdown reset spam
-            current_values = list(self.recipient_combobox['values'])
-            if current_values != dropdown_values:
+            if set(self.contacts_data.keys()) != set(temp_map.keys()):
                 self.contacts_data = temp_map
                 self.root.after(0, self.set_contacts_dropdown, dropdown_values)
 
@@ -540,6 +539,7 @@ class WatsUpUI:
     # ==========================================
 
     def initiate_transmission(self):
+        recipient = self.recipient_var.get().strip()
         self.send_btn.config(state="disabled", text="Sending... Please wait")
         self.browse_btn.config(state="disabled")
         self.recipient_combobox.config(state="disabled")
@@ -548,7 +548,7 @@ class WatsUpUI:
         self.upload_active = True # Speed up polling to 0.5s for smooth progress animation
         
         # Execute the transmission worker on a background thread so Tkinter remains completely responsive
-        threading.Thread(target=self.transmission_worker, daemon=True).start()
+        threading.Thread(target=self.transmission_worker, args=(recipient,), daemon=True).start()
 
     def show_splitting_banner(self, file_name, file_size):
         size_str = self.format_bytes(file_size)
@@ -641,8 +641,7 @@ class WatsUpUI:
                     except: pass
             raise e
 
-    def transmission_worker(self):
-        recipient = self.recipient_var.get().strip()
+    def transmission_worker(self, recipient):
         target_jid = ""
         
         if recipient in self.contacts_data:
@@ -788,11 +787,13 @@ class WatsUpUI:
     # ==========================================
 
     def log_message(self, message):
-        self.logger_box.config(state="normal")
         timestamp = time.strftime("[%H:%M:%S] ")
-        self.logger_box.insert("end", f"{timestamp}{message}\n")
-        self.logger_box.see("end")
-        self.logger_box.config(state="disabled")
+        def update_log():
+            self.logger_box.config(state="normal")
+            self.logger_box.insert("end", f"{timestamp}{message}\n")
+            self.logger_box.see("end")
+            self.logger_box.config(state="disabled")
+        self.root.after(0, update_log)
 
     def format_bytes(self, bytes_val):
         if bytes_val == 0:
