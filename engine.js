@@ -426,48 +426,52 @@ app.post('/api/logout', async (req, res) => {
  * Opens a stream from that local file on the disk and pipes it directly to WhatsApp WebSockets.
  */
 app.post('/api/send', async (req, res) => {
-    const { filePath, recipient } = req.body;
-
-    if (!filePath) {
-        return res.status(400).json({ success: false, error: 'filePath parameter cannot be empty.' });
-    }
-
-    if (!recipient) {
-        return res.status(400).json({ success: false, error: 'recipient JID parameter cannot be empty.' });
-    }
-
-    // Crucial validation: Ensure file actually exists locally
-    if (!fs.existsSync(filePath)) {
-        return res.status(400).json({ success: false, error: `Local file not found at location: ${filePath}` });
-    }
-
-    const jid = formatJid(recipient);
-    if (!jid) {
-        return res.status(400).json({ success: false, error: 'Invalid recipient JID format.' });
-    }
-
-    if (connectionState.status !== 'connected' || !sock) {
-        return res.status(400).json({ success: false, error: 'WhatsApp engine is currently disconnected.' });
-    }
-
-    // Inspect file properties
-    const fileStats = fs.statSync(filePath);
-    const fileName = path.basename(filePath);
-    const mimetype = getMimeType(filePath);
-    const totalBytes = fileStats.size;
-
-    console.log(`[Pipeline] Opening stream for transmission: ${fileName} (${(totalBytes / (1024*1024)).toFixed(2)} MB) -> ${jid}`);
-
-    // Initialize progress tracking state
-    uploadProgress = {
-        active: true,
-        fileName: fileName,
-        bytesSent: 0,
-        totalBytes: totalBytes,
-        percentage: 0
-    };
-
     try {
+        const { filePath, recipient } = req.body;
+
+        if (typeof filePath !== 'string' || !filePath.trim()) {
+            return res.status(400).json({ success: false, error: 'filePath parameter must be a non-empty string.' });
+        }
+
+        if (typeof recipient !== 'string' || !recipient.trim()) {
+            return res.status(400).json({ success: false, error: 'recipient JID parameter must be a non-empty string.' });
+        }
+
+        // Crucial validation: Ensure file actually exists locally
+        if (!fs.existsSync(filePath)) {
+            return res.status(400).json({ success: false, error: `Local file not found at location: ${filePath}` });
+        }
+
+        const jid = formatJid(recipient);
+        if (!jid) {
+            return res.status(400).json({ success: false, error: 'Invalid recipient JID format.' });
+        }
+
+        if (connectionState.status !== 'connected' || !sock) {
+            return res.status(400).json({ success: false, error: 'WhatsApp engine is currently disconnected.' });
+        }
+
+        // Inspect file properties
+        const fileStats = fs.statSync(filePath);
+        if (fileStats.isDirectory()) {
+            return res.status(400).json({ success: false, error: 'Provided path points to a directory, not a file.' });
+        }
+
+        const fileName = path.basename(filePath);
+        const mimetype = getMimeType(filePath);
+        const totalBytes = fileStats.size;
+
+        console.log(`[Pipeline] Opening stream for transmission: ${fileName} (${(totalBytes / (1024*1024)).toFixed(2)} MB) -> ${jid}`);
+
+        // Initialize progress tracking state
+        uploadProgress = {
+            active: true,
+            fileName: fileName,
+            bytesSent: 0,
+            totalBytes: totalBytes,
+            percentage: 0
+        };
+
         let lastLoggedPercent = -1;
         // Use a highWaterMark of 1MB (1024 * 1024 bytes) to read from SSD/disk in large blocks.
         // This significantly reduces disk I/O overhead and accelerates network upload speeds on high-speed VM links.

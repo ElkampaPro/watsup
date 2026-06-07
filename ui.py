@@ -42,6 +42,8 @@ class WatsUpUI:
         self.upload_active = False
         self.contacts_fetched = False
         self.groups_synced = False
+        self.last_status = "offline"
+        self.fetching_contacts = False
         
         # Custom TTK styles
         self.setup_styles()
@@ -347,7 +349,8 @@ class WatsUpUI:
                 # Only poll contacts list if we are connected AND the list has not been successfully fetched yet.
                 # Once we successfully fetch the groups/contacts catalog, polling stops entirely!
                 if self.connection_status == "connected" and not self.contacts_fetched and counter % 5 == 0:
-                    threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
+                    if not self.fetching_contacts:
+                        threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
             time.sleep(sleep_time)
 
     def check_engine_status(self):
@@ -383,22 +386,27 @@ class WatsUpUI:
                 else:
                     if not self.upload_active:
                         self.root.after(0, self.update_progress_ui, 0, "Upload Progress: Idle", "0%")
-                               # Use engine's groupsSynced flag to know exactly when to stop polling contacts
+                # Use engine's groupsSynced flag to know exactly when to stop polling contacts
                 groups_synced = status_res.get("groupsSynced", False)
                 self.groups_synced = groups_synced
  
                 # Fetch contacts list immediately upon first connection transition
-                if not self.contacts_fetched:
-                    threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
+                if self.last_status != "connected":
+                    self.last_status = "connected"
+                    self.contacts_fetched = False
+                    if not self.fetching_contacts:
+                        threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
             elif status == "connecting":
                 self.root.after(0, self.update_status_ui, "CONNECTING", "Establishing raw socket interfaces...", "Offline.TLabel")
                 self.root.after(0, self.close_qr_popup)
                 self.contacts_fetched = False
                 self.groups_synced = False
+                self.last_status = "connecting"
             else:
                 self.root.after(0, self.update_status_ui, "PAIRING REQUIRED", "Engine connected. Scan the QR code in the popup.", "Offline.TLabel")
                 self.contacts_fetched = False
                 self.groups_synced = False
+                self.last_status = "disconnected"
                 if status_res.get("qrAvailable", False):
                     self.root.after(0, self.show_qr_popup)
                 else:
@@ -409,6 +417,7 @@ class WatsUpUI:
             self.contacts_data = {}
             self.contacts_fetched = False
             self.groups_synced = False
+            self.last_status = "offline"
             self.root.after(0, self.update_status_ui, "ENGINE OFFLINE", "Run 'node engine.js' in your terminal SSH window.", "Offline.TLabel")
             self.root.after(0, self.clear_contacts_dropdown)
             self.root.after(0, self.close_qr_popup)
@@ -486,31 +495,35 @@ class WatsUpUI:
         self.recipient_var.set("")
 
     def fetch_contacts_list(self):
-        contacts_res = self.make_api_request("/api/contacts")
-        if isinstance(contacts_res, list):
-            temp_map = {}
-            dropdown_values = []
-            
-            for contact in contacts_res:
-                if contact and "id" in contact and "name" in contact:
-                    jid = contact["id"]
-                    name = contact["name"]
-                    jid_number = jid.split("@")[0]
-                    
-                    # Use Right-to-Left Mark (\u200f) to isolate LTR bracket numbers from RTL Arabic characters
-                    display = f"{name} \u200f(+{jid_number})"
-                    temp_map[display] = jid
-                    dropdown_values.append(display)
-            
-            # Check if the values actually changed to prevent dropdown reset spam
-            if set(self.contacts_data.keys()) != set(temp_map.keys()):
-                self.contacts_data = temp_map
-                self.root.after(0, self.set_contacts_dropdown, dropdown_values)
+        self.fetching_contacts = True
+        try:
+            contacts_res = self.make_api_request("/api/contacts")
+            if isinstance(contacts_res, list):
+                temp_map = {}
+                dropdown_values = []
                 
-            # If the engine has completed group sync, we mark contacts as fully fetched
-            # to stop future polling of this endpoint.
-            if self.groups_synced:
-                self.contacts_fetched = True
+                for contact in contacts_res:
+                    if contact and "id" in contact and "name" in contact:
+                        jid = contact["id"]
+                        name = contact["name"]
+                        jid_number = jid.split("@")[0]
+                        
+                        # Use Right-to-Left Mark (\u200f) to isolate LTR bracket numbers from RTL Arabic characters
+                        display = f"{name} \u200f(+{jid_number})"
+                        temp_map[display] = jid
+                        dropdown_values.append(display)
+                
+                # Check if the values actually changed to prevent dropdown reset spam
+                if set(self.contacts_data.keys()) != set(temp_map.keys()):
+                    self.contacts_data = temp_map
+                    self.root.after(0, self.set_contacts_dropdown, dropdown_values)
+                    
+                # If the engine has completed group sync, we mark contacts as fully fetched
+                # to stop future polling of this endpoint.
+                if self.groups_synced:
+                    self.contacts_fetched = True
+        finally:
+            self.fetching_contacts = False
 
     def setup_default_self_contact(self, user_id):
         display = f"👤 [Me] Chat with Yourself \u200f(+{user_id})"
