@@ -42,10 +42,15 @@ if ! command -v node &> /dev/null; then
     echo "----------------------------------------------------------"
 fi
 
-# Double check python3-tk installation
+# Double check python3-tk and tkinterdnd2 installations
 if ! python3 -c "import tkinter" &> /dev/null; then
     echo "🔧 Installing Python Tkinter library..."
     $SUDO apt-get update && $SUDO apt-get install -y python3-tk
+fi
+
+if ! python3 -c "import tkinterdnd2" &> /dev/null; then
+    echo "🔧 Installing Python tkinterdnd2 library for drag-and-drop support..."
+    pip3 install --no-cache-dir tkinterdnd2 2>/dev/null || pip3 install --no-cache-dir tkinterdnd2 --break-system-packages 2>/dev/null || $SUDO pip3 install --no-cache-dir tkinterdnd2 --break-system-packages 2>/dev/null
 fi
 
 # Install rar CLI utility for authentic split RAR volumes

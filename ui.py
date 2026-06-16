@@ -15,6 +15,12 @@ import os
 import threading
 import time
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    HAS_DND = True
+except ImportError:
+    HAS_DND = False
+
 class WatsUpUI:
     def __init__(self, root):
         self.root = root
@@ -31,6 +37,11 @@ class WatsUpUI:
         self.danger_color = "#ef4444"  # Red
         
         self.root.configure(bg=self.bg_color)
+        
+        # Register drag and drop if available
+        if HAS_DND:
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind('<<Drop>>', self.handle_file_drop)
         
         # Application data states
         self.contacts_data = {}  # Map of display_name -> raw JID
@@ -243,11 +254,38 @@ class WatsUpUI:
             for fp in file_paths:
                 if fp not in self.selected_files:
                     self.selected_files.append(fp)
-                    
+            
+            # Sort alphabetically by base filename
+            self.selected_files.sort(key=lambda x: os.path.basename(x).lower())
             self.refresh_queue_table()
-            self.log_message(f"Added {len(file_paths)} files to queue.")
+            self.log_message(f"Added and sorted {len(file_paths)} files to queue.")
             
         self.validate_inputs()
+
+    def handle_file_drop(self, event):
+        if not event.data:
+            return
+        
+        # Parse Tcl list of dropped files
+        try:
+            files = self.root.tk.splitlist(event.data)
+        except Exception:
+            files = [event.data]
+            
+        added_count = 0
+        for fp in files:
+            fp = os.path.abspath(fp)
+            if os.path.exists(fp) and os.path.isfile(fp):
+                if fp not in self.selected_files:
+                    self.selected_files.append(fp)
+                    added_count += 1
+                    
+        if added_count > 0:
+            # Sort alphabetically by base filename
+            self.selected_files.sort(key=lambda x: os.path.basename(x).lower())
+            self.refresh_queue_table()
+            self.log_message(f"Added and sorted {added_count} files via Drag & Drop.")
+            self.validate_inputs()
 
     def on_tree_select(self, event):
         selected = self.queue_tree.selection()
@@ -824,7 +862,10 @@ class WatsUpUI:
         return f"{round(bytes_val / math.pow(1024, i), 2)} {sizes[i]}"
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    if HAS_DND:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
     app = WatsUpUI(root)
     
     # Elegant custom window closed hook

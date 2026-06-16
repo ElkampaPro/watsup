@@ -32,6 +32,9 @@ RUN apt-get update && \
 # Set working directory for the WhatsApp Streamer app
 WORKDIR /app/watsup
 
+# Install Python drag-and-drop package
+RUN pip3 install --no-cache-dir tkinterdnd2 --break-system-packages
+
 # Copy application files into the container
 COPY package.json engine.js ui.py launch.sh watsup.desktop ./
 
