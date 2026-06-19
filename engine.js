@@ -14,6 +14,14 @@ const fs = require('fs');
 const path = require('path');
 const { Transform } = require('stream');
 
+// Global process safety handlers to catch any Baileys internal async errors
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Engine] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('[Engine] Uncaught Exception:', err);
+});
+
 const app = express();
 const PORT = 5001;
 
@@ -188,7 +196,7 @@ async function connectToWhatsApp() {
         printQRInTerminal: false, // We will custom print this to avoid overflow
         syncFullHistory: false,   // Do not sync history to conserve system RAM
         connectTimeoutMs: 60000,  // Increase connect timeout to 60s
-        defaultQueryTimeoutMs: 90000 // Increase query timeout to 90s to avoid init queries timeout
+        defaultQueryTimeoutMs: 180000 // Increase query timeout to 180s to avoid init queries timeout
     });
 
     sock.ev.on('creds.update', saveCreds);
