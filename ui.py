@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import urllib.request
 import urllib.error
+import urllib.parse
 import json
 import os
 import threading
@@ -64,6 +65,12 @@ class WatsUpUI:
         
         # Start state check and contacts sync loops on background threads
         self.start_background_polling()
+        
+        # Log DnD status to console
+        if HAS_DND:
+            self.log_message("✅ Drag & Drop support initialized successfully.")
+        else:
+            self.log_message("⚠️ Drag & Drop disabled: 'tkinterdnd2' library not found. Run 'launch.sh' to install.")
 
     def setup_styles(self):
         style = ttk.Style()
@@ -262,6 +269,24 @@ class WatsUpUI:
             
         self.validate_inputs()
 
+    def clean_dropped_path(self, path_str):
+        # Strip leading/trailing whitespaces or curlies (Tcl sometimes adds curlies for spacing)
+        path_str = path_str.strip('{} ')
+        
+        # Check if it is a file:// URI (common in XFCE/Thunar file drag and drop)
+        if path_str.startswith('file://'):
+            # Strip file:// prefix
+            path_str = path_str[7:]
+            # URL decode (e.g. %20 -> space)
+            path_str = urllib.parse.unquote(path_str)
+            
+            # On Windows, a URI like file:///C:/path/file.txt becomes /C:/path/file.txt
+            # We need to strip the leading slash if it's followed by a drive letter
+            if os.name == 'nt' and path_str.startswith('/') and len(path_str) > 2 and path_str[2] == ':':
+                path_str = path_str[1:]
+                
+        return path_str
+
     def handle_file_drop(self, event):
         if not event.data:
             return
@@ -274,6 +299,7 @@ class WatsUpUI:
             
         added_count = 0
         for fp in files:
+            fp = self.clean_dropped_path(fp)
             fp = os.path.abspath(fp)
             if os.path.exists(fp) and os.path.isfile(fp):
                 if fp not in self.selected_files:
