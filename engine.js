@@ -160,7 +160,7 @@ async function connectToWhatsApp() {
 
     // High efficiency, silent logging configuration
     const silentLogger = pino({ 
-        level: 'info',
+        level: 'warn',
         transport: {
             target: 'pino-pretty',
             options: { colorize: true }
