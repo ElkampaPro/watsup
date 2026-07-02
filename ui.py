@@ -291,9 +291,13 @@ class WatsUpUI:
         if not event.data:
             return
         
-        # Parse Tcl list of dropped files
+        # Parse list of dropped files
         try:
-            files = self.root.tk.splitlist(event.data)
+            # Check for newline separators (standard for Unix URI lists)
+            if '\n' in event.data:
+                files = [f.strip('{} \r\n') for f in event.data.split('\n') if f.strip()]
+            else:
+                files = self.root.tk.splitlist(event.data)
         except Exception:
             files = [event.data]
             

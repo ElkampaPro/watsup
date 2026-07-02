@@ -1,0 +1,11 @@
+node_modules/
+auth_info_baileys/
+contacts_cache.json
+qr.png
+engine.log
+ui_error.log
+graphify-out/
+watsup_temp_split/
+__pycache__/
+*.pyc
+.gemini/
