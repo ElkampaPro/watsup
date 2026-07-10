@@ -777,6 +777,10 @@ class WatsUpUI:
                 else:
                     self.log_message(f"Streaming file {index + 1} of {total_files}: {fileName}...")
                 
+                # Introduce a 3-second breathing space between parts of the same split file
+                if part_idx > 0:
+                    time.sleep(3)
+
                 payload = {
                     "filePath": path,
                     "recipient": target_jid
@@ -809,6 +813,11 @@ class WatsUpUI:
                 self.log_message(f"Successfully sent {file_num_str}: {fileName}")
             else:
                 self.log_message(f"Failed to send {file_num_str}: {fileName}")
+
+            # Let the connection "breathe" for 5 seconds between files to avoid rate limiting
+            if index < total_files - 1:
+                self.log_message("Waiting 5 seconds before starting next transfer...")
+                time.sleep(5)
                 
         if success_count == total_files:
             self.root.after(0, self.post_transmission_ui, True, f"All {total_files} files streamed and sent successfully!")

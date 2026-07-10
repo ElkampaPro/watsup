@@ -196,7 +196,8 @@ async function connectToWhatsApp() {
         printQRInTerminal: false, // We will custom print this to avoid overflow
         syncFullHistory: false,   // Do not sync history to conserve system RAM
         connectTimeoutMs: 60000,  // Increase connect timeout to 60s
-        defaultQueryTimeoutMs: 180000 // Increase query timeout to 180s to avoid init queries timeout
+        defaultQueryTimeoutMs: 180000, // Increase query timeout to 180s to avoid init queries timeout
+        keepAliveIntervalMs: 15000 // Send keep-alive ping frame every 15s to prevent timeouts during heavy media transfers
     });
 
     sock.ev.on('creds.update', saveCreds);
