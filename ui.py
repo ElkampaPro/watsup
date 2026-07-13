@@ -648,13 +648,19 @@ class WatsUpUI:
         self.splitting_banner.pack_forget()
 
     def split_large_file(self, filePath):
+        import math
         file_size = os.path.getsize(filePath)
         limit = 1950 * 1024 * 1024  # 1.95 GB (Maximum safe limit close to 2GB WhatsApp threshold)
         if file_size <= limit:
             return [filePath], False
             
+        # Calculate equal part size dynamically
+        num_parts = math.ceil(file_size / limit)
+        part_size_bytes = math.ceil(file_size / num_parts)
+        part_size_mb = math.ceil(part_size_bytes / (1024 * 1024))
+            
         file_name = os.path.basename(filePath)
-        self.log_message(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({self.format_bytes(file_size)}) into 1.95 GB RAR parts. Please wait, zero-CPU / zero-RAM active...")
+        self.log_message(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({self.format_bytes(file_size)}) into {num_parts} equally-sized parts (~{self.format_bytes(part_size_bytes)} each). Please wait, zero-CPU / zero-RAM active...")
         self.root.after(0, self.show_splitting_banner, file_name, file_size)
         
         # Create temp folder inside workspace
@@ -668,8 +674,8 @@ class WatsUpUI:
         if rar_bin:
             self.log_message(f"Using system RAR utility for authentic split RAR volumes (-m0 zero-compression)...")
             archive_base = os.path.join(temp_dir, file_name)
-            # Run RAR command: rar a -m0 -v1950M -y {archive_base} {filePath}
-            cmd = [rar_bin, "a", "-m0", "-v1950M", "-y", archive_base, filePath]
+            # Run RAR command: rar a -m0 -v{part_size_mb}M -y {archive_base} {filePath}
+            cmd = [rar_bin, "a", "-m0", f"-v{part_size_mb}M", "-y", archive_base, filePath]
             try:
                 subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=300)
                 
@@ -684,7 +690,7 @@ class WatsUpUI:
                     return part_paths, True
             except Exception as e:
                 self.log_message(f"System RAR command failed: {str(e)}. Falling back to native binary splitter...")
-
+ 
         # Fallback native binary splitter
         part_paths = []
         part_num = 1
@@ -699,8 +705,8 @@ class WatsUpUI:
                     
                     bytes_written = 0
                     with open(part_path, 'wb') as out_f:
-                        while bytes_written < limit:
-                            read_len = min(buffer_size, limit - bytes_written)
+                        while bytes_written < part_size_bytes:
+                            read_len = min(buffer_size, part_size_bytes - bytes_written)
                             chunk = f.read(read_len)
                             if not chunk:
                                 break
