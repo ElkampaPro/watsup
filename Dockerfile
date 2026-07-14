@@ -1,22 +1,28 @@
 # Use LinuxServer.io Ubuntu XFCE Webtop as the base image
+# Constraint: Base image is specified by tag rather than exact digest (sha256), and apt packages are not version-pinned.
+# Consequently, builds are not fully reproducible.
 FROM lscr.io/linuxserver/webtop:ubuntu-xfce
 
 # Set non-interactive mode for apt installations
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Update system and install basic tools (curl)
+# Update system and install basic tools
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl gnupg lsof && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Node.js v20 LTS from NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+# Install Node.js v20 LTS securely using standard repository GPG keys (No curl | bash)
+RUN mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/keyrings/nodesource.list && \
+    mv /etc/apt/keyrings/nodesource.list /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Webtop packages, Python, and Tkinter
+# Install Python and Tkinter dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         firefox \
@@ -32,23 +38,22 @@ RUN apt-get update && \
 # Set working directory for the WhatsApp Streamer app
 WORKDIR /app/watsup
 
-# Install Python drag-and-drop package
-RUN pip3 install --no-cache-dir tkinterdnd2 --break-system-packages
+# Install Python drag-and-drop package pinned to a specific version (0.4.2)
+RUN pip3 install --no-cache-dir tkinterdnd2==0.4.2 --break-system-packages
 
-# Copy application files into the container
-COPY package.json engine.js ui.py launch.sh watsup.desktop ./
+# Copy only package descriptors to cache npm dependency layers
+COPY package.json package-lock.json ./
 
-# Install Node.js production dependencies
-RUN npm install --production
+# Install Node.js production dependencies strictly via npm ci
+RUN npm ci --omit=dev
 
-# Make the launcher script executable
+# Copy application source code
+COPY engine.js ui.py launch.sh watsup.desktop ./
+
+# Make the launcher script executable and apply safe permissions
 RUN chmod +x launch.sh
 
-# Download a beautiful official WhatsApp icon for a premium look
-RUN curl -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -fsSL -o /usr/share/pixmaps/watsup.png https://cdn-icons-png.flaticon.com/512/124/124034.png
-
 # Create the defaults desktop folder if it doesn't exist and copy the desktop launcher
-# Also copy it to the system applications directory so it installs in the XFCE start menu!
 RUN mkdir -p /defaults/Desktop && \
     cp watsup.desktop /defaults/Desktop/watsup.desktop && \
     cp watsup.desktop /usr/share/applications/watsup.desktop

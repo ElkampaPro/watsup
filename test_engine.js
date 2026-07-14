@@ -4,8 +4,17 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 
-const { createApp, formatJid, loadOrCreateToken } = require('./engine.js');
+const {
+    createApp,
+    formatJid,
+    loadOrCreateToken,
+    secureAtomicWriteFile,
+    secureAtomicWriteJson,
+    writeQrSecurely,
+    enforceSecurePermissions
+} = require('./engine.js');
 
 function makeRequest(port, requestPath, method = 'GET', token = null, body = null) {
     return new Promise((resolve, reject) => {
@@ -239,6 +248,171 @@ test('send lock survives rejected requests and releases after socket failure', a
     } finally {
         deferredA.resolve();
         await closeServer(listener.server);
+        fs.rmSync(tempDirectory, { recursive: true, force: true });
+    }
+});
+
+test('all /api/* endpoints reject requests with missing or invalid token with 401', async () => {
+    const token = 'c'.repeat(64);
+    const app = createApp({
+        ipcToken: token,
+        connectionState: { status: 'connected' },
+        getSock: () => ({})
+    });
+    const { server, port } = await listen(app);
+    try {
+        const endpoints = [
+            { path: '/api/status', method: 'GET', body: null },
+            { path: '/api/contacts', method: 'GET', body: null },
+            { path: '/api/logout', method: 'POST', body: {} },
+            { path: '/api/send', method: 'POST', body: { filePath: 'foo.txt', recipient: '123' } }
+        ];
+        for (const ep of endpoints) {
+            // 1. Missing token
+            const res1 = await makeRequest(port, ep.path, ep.method, null, ep.body);
+            assert.equal(res1.statusCode, 401, `Endpoint ${ep.path} must reject missing token`);
+
+            // 2. Invalid token
+            const res2 = await makeRequest(port, ep.path, ep.method, 'invalid_token_here', ep.body);
+            assert.equal(res2.statusCode, 401, `Endpoint ${ep.path} must reject invalid token`);
+        }
+    } finally {
+        await closeServer(server);
+    }
+});
+
+test('JSON payload exceeding 10kb is rejected with 413 Payload Too Large', async () => {
+    const token = 'd'.repeat(64);
+    const app = createApp({
+        ipcToken: token,
+        connectionState: { status: 'connected' },
+        getSock: () => ({})
+    });
+    const { server, port } = await listen(app);
+    try {
+        // Create a body larger than 10kb
+        const heavyBody = { data: 'x'.repeat(11 * 1024) };
+        const res = await makeRequest(port, '/api/send', 'POST', token, heavyBody);
+        assert.equal(res.statusCode, 413);
+        assert.deepEqual(res.body, {
+            success: false,
+            error: 'Payload Too Large: Maximum allowed size is 10kb'
+        });
+    } finally {
+        await closeServer(server);
+    }
+});
+
+test('importing engine.js does not change umask, create files, or bind ports in a fresh process', () => {
+    const cp = require('child_process');
+    const script = `
+        const fs = require('fs');
+        const http = require('http');
+        const path = require('path');
+        const initialUmask = process.umask ? process.umask() : 0;
+        let fileCreated = false;
+        let dirCreated = false;
+        let serverListening = false;
+        const origWrite = fs.writeFileSync;
+        fs.writeFileSync = (...args) => {
+            fileCreated = true;
+            return origWrite(...args);
+        };
+        const origMkdir = fs.mkdirSync;
+        fs.mkdirSync = (...args) => {
+            dirCreated = true;
+            return origMkdir(...args);
+        };
+        const origListen = http.Server.prototype.listen;
+        http.Server.prototype.listen = (...args) => {
+            serverListening = true;
+            return origListen(...args);
+        };
+        require('./engine.js');
+        const finalUmask = process.umask ? process.umask() : 0;
+        console.log(JSON.stringify({
+            umaskMatches: initialUmask === finalUmask,
+            fileCreated,
+            dirCreated,
+            serverListening
+        }));
+    `;
+    const output = cp.execSync('node -e "' + script.replace(/"/g, '\\"').replace(/\n/g, ' ') + '"', { encoding: 'utf8' }).trim();
+    const result = JSON.parse(output);
+    assert.equal(result.umaskMatches, true);
+    assert.equal(result.fileCreated, false);
+    assert.equal(result.dirCreated, false);
+    assert.equal(result.serverListening, false);
+});
+
+test('failure to apply chmod on token or credentials directory propagates error to fail startup', () => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-chmod-test-'));
+    const testTokenPath = path.join(tempDirectory, '.watsup_ipc_token');
+    fs.writeFileSync(testTokenPath, 'e'.repeat(64), 'utf8');
+
+    const originalChmod = fs.chmodSync;
+    fs.chmodSync = (filePath, mode) => {
+        if (filePath === testTokenPath || filePath === tempDirectory) {
+            throw new Error('Chmod failed on simulated locked file');
+        }
+        return originalChmod(filePath, mode);
+    };
+
+    try {
+        assert.throws(() => loadOrCreateToken(testTokenPath), /Chmod failed/);
+        assert.throws(() => enforceSecurePermissions(tempDirectory), /Chmod failed/);
+    } finally {
+        fs.chmodSync = originalChmod;
+        fs.rmSync(tempDirectory, { recursive: true, force: true });
+    }
+});
+
+test('secureAtomicWriteFile writes content and enforces 0600 permissions', (t) => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-write-test-'));
+    const testFile = path.join(tempDirectory, 'test_file.txt');
+    try {
+        secureAtomicWriteFile(testFile, 'hello secure file', { encoding: 'utf8' });
+        assert.equal(fs.readFileSync(testFile, 'utf8'), 'hello secure file');
+
+        if (process.platform === 'win32') {
+            t.skip('POSIX permission bits are not supported on Windows.');
+        } else {
+            const stat = fs.statSync(testFile);
+            assert.equal(stat.mode & 0o777, 0o600);
+        }
+    } finally {
+        fs.rmSync(tempDirectory, { recursive: true, force: true });
+    }
+});
+
+test('contacts_cache.json and qr.png are written with 0600 permissions on POSIX using temp directory', async (t) => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-perm-test-'));
+    const tempCachePath = path.join(tempDirectory, 'contacts_cache.json');
+    const tempQrPath = path.join(tempDirectory, 'qr.png');
+
+    try {
+        const cachedList = [{ id: '123@s.whatsapp.net', name: 'Alice' }];
+        secureAtomicWriteJson(tempCachePath, cachedList);
+
+        assert.ok(fs.existsSync(tempCachePath));
+        if (process.platform === 'win32') {
+            t.skip('POSIX permission bits are not supported on Windows.');
+        } else {
+            const cacheStat = fs.statSync(tempCachePath);
+            assert.equal(cacheStat.mode & 0o777, 0o600);
+        }
+
+        await writeQrSecurely('https://whatsapp.com', tempQrPath);
+        assert.ok(fs.existsSync(tempQrPath));
+        assert.ok(fs.statSync(tempQrPath).size > 0);
+
+        if (process.platform === 'win32') {
+            t.skip('POSIX permission bits are not supported on Windows.');
+        } else {
+            const qrStat = fs.statSync(tempQrPath);
+            assert.equal(qrStat.mode & 0o777, 0o600);
+        }
+    } finally {
         fs.rmSync(tempDirectory, { recursive: true, force: true });
     }
 });

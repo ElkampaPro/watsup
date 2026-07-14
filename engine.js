@@ -154,7 +154,7 @@ function loadContactsCache() {
 function saveContactsCache() {
     try {
         const cachedList = Array.from(contactsMap.values());
-        fs.writeFileSync(cachePath, JSON.stringify(cachedList, null, 2), 'utf8');
+        secureAtomicWriteJson(cachePath, cachedList);
     } catch (err) {
         console.error('[Cache] Error writing contacts cache:', err);
     }
@@ -193,16 +193,65 @@ function formatJid(recipient) {
     return `${digits}@s.whatsapp.net`;
 }
 
-function enforceSecurePermissions(directory = authDir) {
-    if (!fs.existsSync(directory)) return;
+function secureAtomicWriteFile(filePath, content, options = {}) {
+    const dir = path.dirname(filePath);
+    const tempFile = path.join(dir, '.watsup_temp_' + crypto.randomBytes(8).toString('hex') + '.tmp');
+    try {
+        fs.writeFileSync(tempFile, content, { ...options, mode: 0o600 });
+        fs.chmodSync(tempFile, 0o600);
+        fs.renameSync(tempFile, filePath);
+        fs.chmodSync(filePath, 0o600);
+    } catch (err) {
+        try {
+            if (fs.existsSync(tempFile)) {
+                fs.unlinkSync(tempFile);
+            }
+        } catch (e) {}
+        throw err;
+    }
+}
 
-    fs.chmodSync(directory, 0o700);
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-        const entryPath = path.join(directory, entry.name);
-        if (entry.isDirectory()) {
-            enforceSecurePermissions(entryPath);
-        } else if (entry.isFile()) {
-            fs.chmodSync(entryPath, 0o600);
+function secureAtomicWriteJson(filePath, data) {
+    const content = JSON.stringify(data, null, 2);
+    secureAtomicWriteFile(filePath, content, { encoding: 'utf8' });
+}
+
+async function writeQrSecurely(qr, filePath) {
+    const buffer = await new Promise((resolve, reject) => {
+        const QRCode = require('qrcode');
+        QRCode.toBuffer(qr, { width: 260, margin: 1 }, (err, buf) => {
+            if (err) reject(err);
+            else resolve(buf);
+        });
+    });
+    secureAtomicWriteFile(filePath, buffer);
+}
+
+function enforceSecurePermissions(directory = authDir) {
+    if (fs.existsSync(directory)) {
+        fs.chmodSync(directory, 0o700);
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+            const entryPath = path.join(directory, entry.name);
+            if (entry.isDirectory()) {
+                enforceSecurePermissions(entryPath);
+            } else if (entry.isFile()) {
+                fs.chmodSync(entryPath, 0o600);
+            }
+        }
+    }
+    if (directory === authDir) {
+        const extraFiles = [
+            tokenPath,
+            cachePath,
+            path.join(__dirname, 'qr.png'),
+            path.join(__dirname, 'engine.log'),
+            path.join(__dirname, 'ui_error.log'),
+            path.join(__dirname, '.watsup_engine.pid')
+        ];
+        for (const file of extraFiles) {
+            if (fs.existsSync(file)) {
+                fs.chmodSync(file, 0o600);
+            }
         }
     }
 }
@@ -223,7 +272,7 @@ async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
     // High efficiency, silent logging configuration
-    const silentLogger = pino({ 
+    const silentLogger = pino({
         level: 'warn',
         transport: {
             target: 'pino-pretty',
@@ -273,32 +322,29 @@ async function connectToWhatsApp() {
             console.log('🚨 NEW PAIRING QR CODE GENERATED!');
             console.log('Please scan this with your phone under Linked Devices in WhatsApp:');
             console.log('======================================================================\n');
-            
+
             // Print the QR code directly in the terminal using ANSI characters
             qrcodeTerminal.generate(qr, { small: true });
-            
+
             console.log('\n======================================================================\n');
             connectionState.status = 'disconnected';
             connectionState.qrAvailable = true;
 
             // Generate PNG and save it to disk as qr.png for Tkinter UI to display
-            QRCode.toFile(path.join(__dirname, 'qr.png'), qr, {
-                width: 260,
-                margin: 1
-            }, (err) => {
-                if (err) {
-                    console.error('[Engine] Failed to save QR code image:', err);
-                } else {
+            writeQrSecurely(qr, path.join(__dirname, 'qr.png'))
+                .then(() => {
                     console.log('[Engine] QR code image written to disk: qr.png');
-                }
-            });
+                })
+                .catch((err) => {
+                    console.error('[Engine] Failed to save QR code image:', err);
+                });
         }
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
             console.log(`[Baileys] Sockets closed (Reason: ${statusCode}). Attempting Reconnection: ${shouldReconnect}`);
-            
+
             connectionState.status = 'disconnected';
             connectionState.userInfo = null;
             connectionState.qrAvailable = false;
@@ -319,9 +365,13 @@ async function connectToWhatsApp() {
         } else if (connection === 'open') {
             console.log('\n======================================================================');
             console.log('🎉 WHATSAPP CONNECTION SUCCESSFULLY ESTABLISHED!');
-            console.log(`Linked User: +${sock.user.id.split(':')[0]} (${sock.user.name || 'Device'})`);
+            const rawNumber = sock.user.id.split(':')[0];
+            const maskedNumber = rawNumber.length > 4
+                ? rawNumber.slice(0, 3) + '***' + rawNumber.slice(-2)
+                : '***';
+            console.log(`Linked User: +${maskedNumber} (${sock.user.name || 'Device'})`);
             console.log('======================================================================\n');
-            
+
             connectionState.status = 'connected';
             connectionState.userInfo = sock.user;
             connectionState.qrAvailable = false;
@@ -331,7 +381,7 @@ async function connectToWhatsApp() {
             // We temporarily bypass throttle to ensure fresh sync on startup
             lastGroupSyncTime = 0;
             fetchGroupsList().catch(() => {});
-            
+
             // Delete qr.png if it exists
             const qrFile = path.join(__dirname, 'qr.png');
             if (fs.existsSync(qrFile)) {
@@ -348,7 +398,7 @@ async function connectToWhatsApp() {
             if (contact && contact.id) {
                 // Ignore groups in standard contacts catalog syncing to avoid duplicate styling
                 if (contact.id.endsWith('@g.us')) continue;
-                
+
                 const rawName = contact.name || contact.notify || contact.verifiedName || null;
                 if (rawName) {
                     const nameWithPrefix = rawName.startsWith('👤 ') ? rawName : `👤 ${rawName}`;
@@ -367,7 +417,7 @@ async function connectToWhatsApp() {
     sock.ev.on('messaging-history.set', ({ contacts, chats }) => {
         console.log('[Baileys] History synced. Parsing contacts and chats...');
         cacheContacts(contacts);
-        
+
         if (chats) {
             let updated = false;
             for (const chat of chats) {
@@ -376,7 +426,7 @@ async function connectToWhatsApp() {
                     const prefix = isGroup ? '👥 [Group] ' : '👤 ';
                     const rawName = chat.name || chat.notify || (isGroup ? 'Unnamed Group' : `+${chat.id.split('@')[0]}`);
                     const nameWithPrefix = rawName.startsWith(prefix) ? rawName : `${prefix}${rawName}`;
-                    
+
                     contactsMap.set(chat.id, { id: chat.id, name: nameWithPrefix });
                     updated = true;
                 }
@@ -404,7 +454,7 @@ async function fetchGroupsList() {
         connectionState.groupsSynced = true;
         return;
     }
-    
+
     try {
         console.log('[Engine] Syncing WhatsApp groups list from server...');
         const groups = await sock.groupFetchAllParticipating();
@@ -453,7 +503,7 @@ function createApp(config = {}) {
         percentage: 0
     };
 
-    app.use(express.json({ limit: '64kb' }));
+    app.use(express.json({ limit: '10kb' }));
 
     app.use('/api', (req, res, next) => {
         const clientToken = req.headers['x-watsup-token'];
@@ -585,7 +635,7 @@ function createApp(config = {}) {
                 try { fileStream.destroy(); } catch (cleanupErr) {}
             }
             console.error('[Pipeline] High-performance transfer failed:', err);
-            res.status(500).json({ success: false, error: `Transmission failed: ${err.message}` });
+            res.status(500).json({ success: false, error: 'Transmission failed: Internal server error' });
         } finally {
             if (lockAcquired) {
                 sendInProgress = false;
@@ -594,10 +644,22 @@ function createApp(config = {}) {
         }
     });
 
+    // Custom error handling middleware for Express
+    app.use((err, req, res, next) => {
+        if (err && err.type === 'entity.too.large') {
+            return res.status(413).json({ success: false, error: 'Payload Too Large: Maximum allowed size is 10kb' });
+        }
+        res.status(500).json({ success: false, error: 'Transmission failed: Internal server error' });
+    });
+
     return app;
 }
 
 function startEngine() {
+    if (process.platform !== 'win32') {
+        process.umask(0o077);
+    }
+    enforceSecurePermissions(authDir);
     const token = loadOrCreateToken();
     loadContactsCache();
 
@@ -637,5 +699,9 @@ module.exports = {
     startEngine,
     loadOrCreateToken,
     formatJid,
-    getMimeType
+    getMimeType,
+    secureAtomicWriteFile,
+    secureAtomicWriteJson,
+    writeQrSecurely,
+    enforceSecurePermissions
 };
