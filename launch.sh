@@ -39,9 +39,24 @@ if [ ${#MISSING_DEPS[@]} -ne 0 ]; then
     exit 1
 fi
 
-# Optional package check (no failure if missing)
+# Optional package check and auto-installation for Drag & Drop support
 if ! python3 -c "import tkinterdnd2" &> /dev/null; then
-    echo "ℹ️ Notice: Python 'tkinterdnd2' library is not found. Drag & Drop will be disabled."
+    echo "📦 Python 'tkinterdnd2' library is missing. Attempting automatic installation..."
+    if ! command -v pip3 &> /dev/null; then
+        echo "🔧 Installing python3-pip..."
+        sudo apt-get update && sudo apt-get install -y python3-pip
+    fi
+    if command -v pip3 &> /dev/null; then
+        echo "🔧 Installing tkinterdnd2 via pip..."
+        pip3 install tkinterdnd2 --break-system-packages
+        if python3 -c "import tkinterdnd2" &> /dev/null; then
+            echo "✅ Python 'tkinterdnd2' installed successfully! Drag & Drop is enabled."
+        else
+            echo "⚠️ Warning: Failed to install 'tkinterdnd2'. Drag & Drop will be disabled."
+        fi
+    else
+        echo "⚠️ Warning: pip3 is not available. Drag & Drop will be disabled."
+    fi
 fi
 if ! command -v rar &> /dev/null; then
     echo "ℹ️ Notice: System 'rar' utility is not found. Fallback raw binary splitter will be used."
