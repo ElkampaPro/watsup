@@ -385,7 +385,7 @@ class WatsUpUI:
 
             self.recipient_combobox['values'] = matches
 
-        self.recipient_combobox.event_generate('<Down>')
+        # Do not force dropdown via '<Down>' event as it steals keyboard focus and interrupts typing
         self.validate_inputs()
 
     def validate_inputs(self, event=None):
