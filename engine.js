@@ -6,6 +6,7 @@
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcodeTerminal = require('qrcode-terminal');
@@ -22,15 +23,53 @@ process.on('uncaughtException', (err) => {
     console.error('[Engine] Uncaught Exception:', err);
 });
 
-const app = express();
 const PORT = 5001;
-
-// Enable strict JSON body parsing
-app.use(express.json());
 
 // Path declarations
 const authDir = path.join(__dirname, 'auth_info_baileys');
 const cachePath = path.join(__dirname, 'contacts_cache.json');
+const tokenPath = path.join(__dirname, '.watsup_ipc_token');
+const TOKEN_PATTERN = /^[a-fA-F0-9]{64}$/;
+
+let ipcToken = null;
+
+/**
+ * Loads a valid IPC token or replaces an invalid/missing token atomically.
+ * Passing a custom path keeps tests isolated from the real project token.
+ */
+function loadOrCreateToken(customTokenPath = tokenPath) {
+    if (customTokenPath === tokenPath && ipcToken) {
+        return ipcToken;
+    }
+
+    let temporaryPath = null;
+    try {
+        if (fs.existsSync(customTokenPath)) {
+            const existingToken = fs.readFileSync(customTokenPath, 'utf8').trim();
+            if (TOKEN_PATTERN.test(existingToken)) {
+                fs.chmodSync(customTokenPath, 0o600);
+                if (customTokenPath === tokenPath) ipcToken = existingToken;
+                return existingToken;
+            }
+        }
+
+        const newToken = crypto.randomBytes(32).toString('hex');
+        temporaryPath = `${customTokenPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+        fs.writeFileSync(temporaryPath, newToken, { encoding: 'utf8', mode: 0o600 });
+        fs.chmodSync(temporaryPath, 0o600);
+        fs.renameSync(temporaryPath, customTokenPath);
+        temporaryPath = null;
+        fs.chmodSync(customTokenPath, 0o600);
+
+        if (customTokenPath === tokenPath) ipcToken = newToken;
+        return newToken;
+    } catch (err) {
+        if (temporaryPath && fs.existsSync(temporaryPath)) {
+            try { fs.unlinkSync(temporaryPath); } catch (cleanupErr) {}
+        }
+        throw new Error(`Critical: Secure IPC token could not be initialized: ${err.message}`);
+    }
+}
 
 // Progress monitoring transform stream
 class ProgressStream extends Transform {
@@ -57,14 +96,6 @@ let connectionState = {
     userInfo: null,          // Logged-in WhatsApp details
     qrAvailable: false,
     groupsSynced: false
-};
-
-let uploadProgress = {
-    active: false,
-    fileName: '',
-    bytesSent: 0,
-    totalBytes: 0,
-    percentage: 0
 };
 
 const contactsMap = new Map();
@@ -147,13 +178,33 @@ function deleteAuthFolder() {
  * Validates and formats international digits into a WhatsApp standard JID
  */
 function formatJid(recipient) {
+    if (typeof recipient !== 'string') return null;
     recipient = recipient.trim();
     if (recipient.includes('@')) {
-        return recipient;
+        const isUserJid = /^\d{5,20}@s\.whatsapp\.net$/.test(recipient);
+        const isGroupJid = /^\d+(?:-\d+)?@g\.us$/.test(recipient);
+        const isLidJid = /^\d+@lid$/.test(recipient);
+        return isUserJid || isGroupJid || isLidJid ? recipient : null;
     }
+
+    if (!/^\+?[\d\s()\-]+$/.test(recipient)) return null;
     const digits = recipient.replace(/\D/g, '');
-    if (!digits) return null;
+    if (digits.length < 6 || digits.length > 20) return null;
     return `${digits}@s.whatsapp.net`;
+}
+
+function enforceSecurePermissions(directory = authDir) {
+    if (!fs.existsSync(directory)) return;
+
+    fs.chmodSync(directory, 0o700);
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const entryPath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+            enforceSecurePermissions(entryPath);
+        } else if (entry.isFile()) {
+            fs.chmodSync(entryPath, 0o600);
+        }
+    }
 }
 
 /**
@@ -163,6 +214,11 @@ async function connectToWhatsApp() {
     console.log('[Baileys] Launching WhatsApp WebSocket driver...');
     connectionState.status = 'connecting';
     connectionState.userInfo = null;
+
+    if (!fs.existsSync(authDir)) {
+        fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
+    }
+    enforceSecurePermissions(authDir);
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
@@ -200,7 +256,14 @@ async function connectToWhatsApp() {
         keepAliveIntervalMs: 15000 // Send keep-alive ping frame every 15s to prevent timeouts during heavy media transfers
     });
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('creds.update', async () => {
+        try {
+            await saveCreds();
+            enforceSecurePermissions(authDir);
+        } catch (err) {
+            console.error('[Auth] Failed to save credentials securely:', err);
+        }
+    });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -364,166 +427,215 @@ async function fetchGroupsList() {
     }
 }
 
-// Load cache and run core WebSocket
-loadContactsCache();
-connectToWhatsApp();
-
 /* ==========================================
    SECURE LOCAL REST API (127.0.0.1 only)
    ========================================== */
 
-/**
- * Returns connection state and session details
- */
-app.get('/api/status', (req, res) => {
-    res.json({
-        ...connectionState,
-        uploadProgress: uploadProgress
+function createApp(config = {}) {
+    const app = express();
+    const activeToken = config.ipcToken || loadOrCreateToken(config.tokenPath || tokenPath);
+    const activeState = config.connectionState || connectionState;
+    const getActiveSock = config.getSock || (() => sock);
+    const activeContacts = config.contactsMap || contactsMap;
+    const syncGroups = config.fetchGroupsList || fetchGroupsList;
+    const clearAuth = config.deleteAuthFolder || deleteAuthFolder;
+
+    if (!TOKEN_PATTERN.test(activeToken)) {
+        throw new Error('IPC token must be a 64-character hexadecimal string.');
+    }
+
+    let sendInProgress = false;
+    const uploadProgress = {
+        active: false,
+        fileName: '',
+        bytesSent: 0,
+        totalBytes: 0,
+        percentage: 0
+    };
+
+    app.use(express.json({ limit: '64kb' }));
+
+    app.use('/api', (req, res, next) => {
+        const clientToken = req.headers['x-watsup-token'];
+        if (typeof clientToken !== 'string') {
+            return res.status(401).json({ success: false, error: 'Unauthorized: Missing IPC token.' });
+        }
+
+        const clientBuffer = Buffer.from(clientToken, 'utf8');
+        const expectedBuffer = Buffer.from(activeToken, 'utf8');
+        if (clientBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(clientBuffer, expectedBuffer)) {
+            return res.status(401).json({ success: false, error: 'Unauthorized: Invalid IPC token.' });
+        }
+        next();
     });
-});
 
-/**
- * Returns sorted list of synced contacts
- */
-app.get('/api/contacts', async (req, res) => {
-    // Run group sync asynchronously in background (throttled)
-    fetchGroupsList().catch(() => {});
-    
-    const list = Array.from(contactsMap.values());
-    
-    // Sort standard contacts alphabetically first
-    list.sort((a, b) => a.name.localeCompare(b.name));
-    
-    // Dynamically PREPEND the connected user's own number to the top of the contacts list
-    // This guarantees the self-chat option appears at the very top of the dropdown!
-    if (sock && sock.user && sock.user.id) {
-        const myNumber = sock.user.id.split(':')[0];
-        const myJid = `${myNumber}@s.whatsapp.net`;
-        
-        list.unshift({
-            id: myJid,
-            name: '👤 [Me] Chat with Yourself'
+    app.get('/api/status', (req, res) => {
+        res.json({
+            ...activeState,
+            uploadProgress: { ...uploadProgress }
         });
-    }
-    
-    res.json(list);
-});
+    });
 
-/**
- * Destroys session and wipes credentials
- */
-app.post('/api/logout', async (req, res) => {
-    console.log('[Server] Processing logout call.');
-    try {
-        if (sock) {
-            await sock.logout();
+    app.get('/api/contacts', async (req, res) => {
+        Promise.resolve(syncGroups()).catch(() => {});
+
+        const list = Array.from(activeContacts.values());
+        list.sort((a, b) => a.name.localeCompare(b.name));
+
+        const currentSock = getActiveSock();
+        if (currentSock && currentSock.user && currentSock.user.id) {
+            const myNumber = currentSock.user.id.split(':')[0];
+            list.unshift({
+                id: `${myNumber}@s.whatsapp.net`,
+                name: '👤 [Me] Chat with Yourself'
+            });
         }
-        deleteAuthFolder();
-        connectionState = { status: 'disconnected', userInfo: null, qrAvailable: false, groupsSynced: false };
-        res.json({ success: true, message: 'Logged out successfully.' });
-    } catch (err) {
-        console.error('[Server] Error handling clean logout:', err);
-        deleteAuthFolder();
-        connectionState = { status: 'disconnected', userInfo: null, qrAvailable: false, groupsSynced: false };
-        res.json({ success: true, message: 'Forced session wipe completed.' });
-    }
-});
+        res.json(list);
+    });
 
-/**
- * Direct file-streaming pipeline.
- * Receives the local path from the local Tkinter GUI.
- * Opens a stream from that local file on the disk and pipes it directly to WhatsApp WebSockets.
- */
-app.post('/api/send', async (req, res) => {
-    try {
-        const { filePath, recipient } = req.body;
-
-        if (typeof filePath !== 'string' || !filePath.trim()) {
-            return res.status(400).json({ success: false, error: 'filePath parameter must be a non-empty string.' });
-        }
-
-        if (typeof recipient !== 'string' || !recipient.trim()) {
-            return res.status(400).json({ success: false, error: 'recipient JID parameter must be a non-empty string.' });
-        }
-
-        // Crucial validation: Ensure file actually exists locally
-        if (!fs.existsSync(filePath)) {
-            return res.status(400).json({ success: false, error: `Local file not found at location: ${filePath}` });
-        }
-
-        const jid = formatJid(recipient);
-        if (!jid) {
-            return res.status(400).json({ success: false, error: 'Invalid recipient JID format.' });
-        }
-
-        if (connectionState.status !== 'connected' || !sock) {
-            return res.status(400).json({ success: false, error: 'WhatsApp engine is currently disconnected.' });
-        }
-
-        // Inspect file properties
-        const fileStats = fs.statSync(filePath);
-        if (fileStats.isDirectory()) {
-            return res.status(400).json({ success: false, error: 'Provided path points to a directory, not a file.' });
-        }
-
-        const fileName = path.basename(filePath);
-        const mimetype = getMimeType(filePath);
-        const totalBytes = fileStats.size;
-
-        console.log(`[Pipeline] Opening stream for transmission: ${fileName} (${(totalBytes / (1024*1024)).toFixed(2)} MB) -> ${jid}`);
-
-        // Initialize progress tracking state
-        uploadProgress = {
-            active: true,
-            fileName: fileName,
-            bytesSent: 0,
-            totalBytes: totalBytes,
-            percentage: 0
-        };
-
-        let lastLoggedPercent = -1;
-        // Use a highWaterMark of 1MB (1024 * 1024 bytes) to read from SSD/disk in large blocks.
-        // This significantly reduces disk I/O overhead and accelerates network upload speeds on high-speed VM links.
-        const fileStream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
-        const progressStream = fileStream.pipe(new ProgressStream(totalBytes, (bytesRead, total, percentage) => {
-            uploadProgress.bytesSent = bytesRead;
-            uploadProgress.percentage = percentage;
-            
-            // Log to terminal at 10% milestones to keep console clean and useful
-            const rounded = Math.floor(percentage / 10) * 10;
-            if (rounded > lastLoggedPercent) {
-                console.log(`[Pipeline] Streamed ${rounded}% (${(bytesRead / (1024 * 1024)).toFixed(2)} MB / ${(total / (1024 * 1024)).toFixed(2)} MB)`);
-                lastLoggedPercent = rounded;
+    app.post('/api/logout', async (req, res) => {
+        console.log('[Server] Processing logout call.');
+        const currentSock = getActiveSock();
+        try {
+            if (currentSock && typeof currentSock.logout === 'function') {
+                await currentSock.logout();
             }
-        }));
+            clearAuth();
+            Object.assign(activeState, { status: 'disconnected', userInfo: null, qrAvailable: false, groupsSynced: false });
+            res.json({ success: true, message: 'Logged out successfully.' });
+        } catch (err) {
+            console.error('[Server] Error handling clean logout:', err);
+            clearAuth();
+            Object.assign(activeState, { status: 'disconnected', userInfo: null, qrAvailable: false, groupsSynced: false });
+            res.json({ success: true, message: 'Forced session wipe completed.' });
+        }
+    });
 
-        // Send via a memory-efficient dynamic readable stream
-        await sock.sendMessage(jid, {
-            document: { stream: progressStream },
-            mimetype: mimetype,
-            fileName: fileName
-        });
+    app.post('/api/send', async (req, res) => {
+        let fileStream = null;
+        let lockAcquired = false;
+        try {
+            const { filePath, recipient } = req.body || {};
 
-        // Set to 100% on successful completion
-        uploadProgress.bytesSent = totalBytes;
-        uploadProgress.percentage = 100;
-        uploadProgress.active = false;
+            if (typeof filePath !== 'string' || !filePath.trim()) {
+                return res.status(400).json({ success: false, error: 'filePath parameter must be a non-empty string.' });
+            }
+            if (typeof recipient !== 'string' || !recipient.trim()) {
+                return res.status(400).json({ success: false, error: 'recipient JID parameter must be a non-empty string.' });
+            }
+            if (!fs.existsSync(filePath)) {
+                return res.status(400).json({ success: false, error: `Local file not found at location: ${filePath}` });
+            }
 
-        console.log(`[Pipeline] Completed streaming transmission of: ${fileName}`);
-        res.json({ success: true, message: 'File streamed and sent successfully!' });
+            const fileStats = fs.statSync(filePath);
+            if (!fileStats.isFile()) {
+                return res.status(400).json({ success: false, error: 'Provided path is not a regular file.' });
+            }
+
+            const jid = formatJid(recipient);
+            if (!jid) {
+                return res.status(400).json({ success: false, error: 'Invalid recipient JID format.' });
+            }
+
+            const currentSock = getActiveSock();
+            if (activeState.status !== 'connected' || !currentSock) {
+                return res.status(400).json({ success: false, error: 'WhatsApp engine is currently disconnected.' });
+            }
+
+            if (sendInProgress) {
+                return res.status(409).json({ success: false, error: 'Another file transmission is currently in progress.' });
+            }
+            sendInProgress = true;
+            lockAcquired = true;
+
+            const fileName = path.basename(filePath);
+            const totalBytes = fileStats.size;
+            Object.assign(uploadProgress, {
+                active: true,
+                fileName,
+                bytesSent: 0,
+                totalBytes,
+                percentage: 0
+            });
+
+            let lastLoggedPercent = -1;
+            fileStream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
+            const progressStream = fileStream.pipe(new ProgressStream(totalBytes, (bytesRead, total, percentage) => {
+                uploadProgress.bytesSent = bytesRead;
+                uploadProgress.percentage = percentage;
+
+                const rounded = Math.floor(percentage / 10) * 10;
+                if (rounded > lastLoggedPercent) {
+                    console.log(`[Pipeline] Streamed ${rounded}% (${(bytesRead / (1024 * 1024)).toFixed(2)} MB / ${(total / (1024 * 1024)).toFixed(2)} MB)`);
+                    lastLoggedPercent = rounded;
+                }
+            }));
+
+            await currentSock.sendMessage(jid, {
+                document: { stream: progressStream },
+                mimetype: getMimeType(filePath),
+                fileName
+            });
+
+            uploadProgress.bytesSent = totalBytes;
+            uploadProgress.percentage = 100;
+            res.json({ success: true, message: 'File streamed and sent successfully!' });
+        } catch (err) {
+            if (fileStream) {
+                try { fileStream.destroy(); } catch (cleanupErr) {}
+            }
+            console.error('[Pipeline] High-performance transfer failed:', err);
+            res.status(500).json({ success: false, error: `Transmission failed: ${err.message}` });
+        } finally {
+            if (lockAcquired) {
+                sendInProgress = false;
+                uploadProgress.active = false;
+            }
+        }
+    });
+
+    return app;
+}
+
+function startEngine() {
+    const token = loadOrCreateToken();
+    loadContactsCache();
+
+    const app = createApp({
+        ipcToken: token,
+        connectionState,
+        getSock: () => sock
+    });
+
+    const server = app.listen(PORT, '127.0.0.1', () => {
+        console.log(`===========================================================`);
+        console.log(` 🚀 WatsUp Desktop Engine is running locally`);
+        console.log(` IPC API listening on: http://127.0.0.1:${PORT}`);
+        console.log(` Strictly locked to loopback (local loop only)`);
+        console.log(`===========================================================`);
+    });
+
+    connectToWhatsApp().catch((err) => {
+        connectionState.status = 'disconnected';
+        connectionState.userInfo = null;
+        console.error('[Baileys] Failed to initialize WhatsApp connection:', err);
+    });
+    return server;
+}
+
+if (require.main === module) {
+    try {
+        startEngine();
     } catch (err) {
-        // Reset progress monitoring on exception
-        uploadProgress.active = false;
-        console.error('[Pipeline] High-performance transfer failed:', err);
-        res.status(500).json({ success: false, error: `Transmission failed: ${err.message}` });
+        console.error('[Engine] Startup failed:', err.message);
+        process.exitCode = 1;
     }
-});
+}
 
-// Start Express listening strictly on localhost loopback (127.0.0.1) for isolation
-app.listen(PORT, '127.0.0.1', () => {
-    console.log(`===========================================================`);
-    console.log(` 🚀 WatsUp Desktop Engine is running locally`);
-    console.log(` IPC API listening on: http://127.0.0.1:${PORT}`);
-    console.log(` Strictly locked to loopback (local loop only)`);
-    console.log(`===========================================================`);
-});
+module.exports = {
+    createApp,
+    startEngine,
+    loadOrCreateToken,
+    formatJid,
+    getMimeType
+};

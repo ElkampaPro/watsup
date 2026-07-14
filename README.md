@@ -21,10 +21,18 @@ WatsUp Desktop Streamer consists of two independent local processes communicatin
 1.  **The Background Engine (`engine.js`)**: A silent Node.js daemon using the `@whiskeysockets/baileys` library. It connects directly to WhatsApp servers via raw WebSockets. It operates at **< 80MB RAM** at idle and exposes a local-only REST API on loopback `127.0.0.1:5001`.
 2.  **The Desktop GUI (`ui.py`)**: A native Python desktop interface using standard `tkinter` and `ttk` libraries. It consumes **< 15MB RAM**, requires **zero pip dependencies**, and provides a responsive, dark-themed dashboard to select files, manage the queue, and select contacts.
 
-### ⚡ 100% Flat RAM Streaming Pipeline
-Instead of loading massive files into RAM buffers, the Python GUI simply sends the absolute local file path string to the background engine. 
+### 🔒 IPC Security & Token Protection
+The background engine generates a secure 32-byte dynamic token at startup inside `.watsup_ipc_token` (with strict `0o600` owner-only permissions). All REST API requests under `/api/*` are strictly authenticated via the `X-WatsUp-Token` header using a `crypto.timingSafeEqual` comparison.
+> [!NOTE]
+> This security token is designed to block unauthorized cross-origin or local processes from interfacing with your WhatsApp background socket. It reduces the local attack surface but is not a absolute protection against malware running with the same user privileges (since any process running as the current user could read the token file).
 
-The engine opens a high-performance stream directly from the disk using a tuned **1 MB block size** (`highWaterMark`), encrypts it chunk-by-chunk, and feeds it straight to the network socket. The memory footprint remains completely flat even during the sequential transfer of multiple **2GB files**.
+### ⚡ 100% Flat RAM Streaming Pipeline & File Splitting
+Instead of loading massive files into RAM buffers, the Python GUI simply sends the absolute local file path string to the background engine. The engine opens a high-performance stream directly from the disk using a tuned **1 MB block size** (`highWaterMark`), encrypts it chunk-by-chunk, and feeds it straight to the network socket.
+
+For files exceeding 1.95 GB:
+- If `rar` CLI is available, the GUI splits the file into equally-sized RAR volumes.
+- Otherwise, the GUI performs zero-RAM native binary splitting into raw chunks named `.part001`, `.part002`, etc.
+- A `manifest.txt` file is generated inside the split directory containing file details and command line merge instructions (using `copy /b` on Windows or `cat` on Linux). This manifest is automatically sent to the recipient along with the parts to guide extraction.
 
 ---
 
@@ -82,10 +90,27 @@ python3 ui.py
 
 ---
 
+## 🧪 Running Unit Tests
+
+The project includes offline-capable unit tests for both Node.js and Python environments:
+
+```bash
+# Run Node.js engine unit tests only
+npm run test:node
+
+# Run Python UI unit tests only (with bytecode disabled)
+npm run test:python
+
+# Run all project tests sequentially
+npm run test:all
+```
+
+---
+
 ## 🖥️ Operating the Dashboard
 
 1.  **Check Connection**: The status card at the top will automatically show `CONNECTED` in green and display the linked phone details.
 2.  **Select Recipient**: Click the recipient field. Your synced WhatsApp contacts (marked with `👤 `) and participated Groups (marked with `👥 [Group] `) will populate the dropdown automatically. Start typing to filter, or type any international phone number directly to use manual entry.
 3.  **Files Queue**: Click **Add Files...** to select one or multiple files of any size (up to 2GB each). They will appear inside the embedded, scrollable queue table with their individual sizes.
 4.  **Manage Queue**: To remove an unwanted file before sending, select it in the table and click the red **Remove Selected** button.
-5.  **Stream**: Click the purple **Send via local disk stream** button. The files will stream sequentially in the background while the progress bar and logs console update in real time.
+5.  **Stream**: Click the purple **Send via local disk stream** button. The files will stream sequentially in the background while the progress bar and logs console update in real time. Failed files are retained in the queue for convenient retries.

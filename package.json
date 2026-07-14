@@ -4,7 +4,11 @@
   "description": "Background WhatsApp WebSocket engine with raw streaming pipelines for heavy files.",
   "main": "engine.js",
   "scripts": {
-    "start": "node engine.js"
+    "start": "node engine.js",
+    "test": "node --test test_engine.js",
+    "test:node": "node --test test_engine.js",
+    "test:python": "python test_ui.py",
+    "test:all": "npm run test:node && npm run test:python"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
