@@ -15,7 +15,7 @@ This document logs the baseline footprint and performance measurements recorded 
 
 ## Performance Metrics
 
-### 1. Idle Footprint (Warm state)
+### 1. Idle Footprint (Windows Baseline)
 - **Production Node/Baileys RSS:** Manual pre-Phase-1 gate
 - **Python UI RSS:** Manual pre-Phase-1 gate
 
@@ -41,6 +41,25 @@ The following metrics were captured under the target Linux environment:
 - **Failed tests:** 0
 - **Skipped tests:** 0
 - **Linux local mock pipeline median:** 71.26 ms / 1403.35 MB/s
+
+### Production Connected State Footprint (Linux)
+Recorded under real active WhatsApp pairing at idle status:
+- **Status:** connected
+- **groupsSynced:** true
+- **uploadProgress.phase:** idle
+
+#### Node/Baileys:
+- **RSS samples:** 139520, 139532, 139544 KB
+- **Median:** 139532 KB / 136.26 MiB
+- **CPU:** approximately 1.5%
+
+#### Python UI:
+- **RSS samples:** 45836, 45840, 45840 KB
+- **Median:** 45840 KB / 44.77 MiB
+- **CPU:** approximately 0.4%
+
+#### Combined Median Footprint:
+- **Combined:** 185372 KB / 181.03 MiB
 
 > [!IMPORTANT]
 > Windows and Linux performance metrics are not directly comparable due to differences in hardware specifications, CPU profiles, disk configurations, and filesystem architectures.
