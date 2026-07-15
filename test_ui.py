@@ -78,22 +78,26 @@ class TestWatsUpUI(unittest.TestCase):
         err_json = {"success": False, "error": "Another send is in progress"}
         err_stream = io.BytesIO(json.dumps(err_json).encode('utf-8'))
 
-        # Raise HTTPError
-        mock_err = urllib.error.HTTPError(
-            url="http://127.0.0.1:5001/api/send",
-            code=409,
-            msg="Conflict",
-            hdrs={},
-            fp=err_stream
-        )
+        try:
+            # Raise HTTPError
+            mock_err = urllib.error.HTTPError(
+                url="http://127.0.0.1:5001/api/send",
+                code=409,
+                msg="Conflict",
+                hdrs={},
+                fp=err_stream
+            )
 
-        with patch('urllib.request.urlopen', side_effect=mock_err):
-            res = self.ui.make_api_request("/api/send", data={"filePath": "dummy.txt"})
+            with patch('urllib.request.urlopen', side_effect=mock_err):
+                res = self.ui.make_api_request("/api/send", data={"filePath": "dummy.txt"})
 
-            # Assertions
-            self.assertEqual(res.get("success"), False)
-            self.assertEqual(res.get("error"), "Another send is in progress")
-            self.assertEqual(res.get("status_code"), 409)
+                # Assertions
+                self.assertEqual(res.get("success"), False)
+                self.assertEqual(res.get("error"), "Another send is in progress")
+                self.assertEqual(res.get("status_code"), 409)
+                self.assertTrue(err_stream.closed)
+        finally:
+            err_stream.close()
 
     def test_raw_splitting_naming(self):
         # Verify that fallback splitter creates files named part001, part002 (no .rar suffix) and appends manifest

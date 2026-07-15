@@ -88,10 +88,11 @@ export WATSUP_CMP="$TEST_BIN_DIR/cmp"
 create_fail_closed_mock() {
     local name="$1"
     echo -e '#!/bin/bash\necho "❌ Error: Fail-closed mock called for '"$name"' with args: $*" >&2\nexit 1' > "$TEST_BIN_DIR/$name"
-    chmod +x "$TEST_BIN_DIR/$name"
+    # Always make mock executable using system path
+    PATH="$SYSTEM_PATH" chmod +x "$TEST_BIN_DIR/$name"
 }
 
-for wrapper in cp mv rm touch apt-get curl gpg mktemp install chmod sudo cmp node npm python3 id stat wc lsof; do
+for wrapper in cp mv rm touch apt-get curl gpg mktemp install chmod sudo cmp node npm python3 id stat wc lsof safe_make_test_executable; do
     create_fail_closed_mock "$wrapper"
 done
 
@@ -102,7 +103,7 @@ command() {
         if [ "${MOCK_NO_REALPATH:-false}" = "true" ] && [[ "$cmd" =~ ^(realpath|readlink)$ ]]; then
             return 1
         fi
-        if [[ "$cmd" =~ ^(node|npm|python3|curl|lsof|gpg|apt-get|install|chmod|sudo|cp|mv|rm|touch|cmp)$ ]]; then
+        if [[ "$cmd" =~ ^(node|npm|python3|curl|lsof|gpg|apt-get|install|chmod|sudo|cp|mv|rm|touch|cmp|safe_make_test_executable)$ ]]; then
             [ -x "$TEST_BIN_DIR/$cmd" ]
             return $?
         fi
@@ -168,6 +169,33 @@ assert_safe_test_path() {
     fi
     return 0
 }
+
+safe_make_test_executable() {
+    local path="$1"
+    if [ -z "$path" ]; then
+        return 1
+    fi
+    local canonical
+    if command -v realpath &>/dev/null; then
+        canonical=$(realpath "$path" 2>/dev/null)
+    elif command -v readlink &>/dev/null; then
+        canonical=$(readlink -f "$path" 2>/dev/null)
+    else
+        canonical="$path"
+    fi
+    if [ -z "$canonical" ]; then
+        return 1
+    fi
+    case "$canonical" in
+        "$TEST_TEMP_DIR"/*) ;;
+        *)
+            echo "HOST_PATH_BLOCKED: path '$path' is outside sandbox." >&2
+            return 99
+            ;;
+    esac
+    PATH="$SYSTEM_PATH" chmod +x "$canonical"
+}
+export -f safe_make_test_executable 2>/dev/null
 
 safe_remove_dir() {
     local dir_path="$1"
@@ -278,6 +306,50 @@ setup_success_mocks() {
     # Clean up config files and log files left by previous tests to prevent test pollution
     PATH="$SYSTEM_PATH" rm -f "$WATSUP_KEYRING_DIR/nodesource.gpg" "$WATSUP_NODESOURCE_LIST" "$WATSUP_LOG_PATH" "${WATSUP_LOG_PATH}.1"
     PATH="$SYSTEM_PATH" rm -f "$TEST_TEMP_DIR"/engine.log.tmp_*
+
+    # Write the safe_make_test_executable helper script
+    cat << 'EOF' > "$TEST_BIN_DIR/safe_make_test_executable"
+#!/bin/bash
+path="$1"
+if [ -z "$path" ]; then
+    echo "❌ Error: safe_make_test_executable called with empty path" >&2
+    exit 1
+fi
+canonical=""
+if command -v realpath &>/dev/null; then
+    canonical=$(realpath "$path" 2>/dev/null)
+elif command -v readlink &>/dev/null; then
+    canonical=$(readlink -f "$path" 2>/dev/null)
+fi
+if [ -z "$canonical" ]; then
+    parent_dir=$(dirname "$path")
+    base_name=$(basename "$path")
+    if [ -n "$parent_dir" ] && [ -d "$parent_dir" ]; then
+        if command -v realpath &>/dev/null; then
+            canonical=$(realpath "$parent_dir" 2>/dev/null)
+        else
+            canonical=$(readlink -f "$parent_dir" 2>/dev/null)
+        fi
+        if [ -n "$canonical" ]; then
+            canonical="$canonical/$base_name"
+        fi
+    fi
+fi
+if [ -z "$canonical" ]; then
+    echo "❌ Error: Could not canonicalize '$path'" >&2
+    exit 1
+fi
+case "$canonical" in
+    "$WATSUP_TEST_ROOT"/*) ;;
+    *)
+        echo "HOST_PATH_BLOCKED: path '$path' is outside sandbox." >&2
+        exit 99
+        ;;
+esac
+PATH="$SYSTEM_PATH" chmod +x "$canonical"
+EOF
+    # Make the helper script executable using host system chmod
+    PATH="$SYSTEM_PATH" chmod +x "$TEST_BIN_DIR/safe_make_test_executable"
 
     # Write the inline path safety checker helper script
     cat << 'EOF' > "$TEST_BIN_DIR/path_safety_check.sh"
@@ -549,7 +621,8 @@ done
 PATH="$SYSTEM_PATH" wc "$@"
 EOF
 
-    chmod +x "$TEST_BIN_DIR"/*
+    # Make all setup mocks executable using host system chmod explicitly
+    PATH="$SYSTEM_PATH" chmod +x "$TEST_BIN_DIR"/*
 }
 
 # ----------------- TEST CASES -----------------
@@ -815,10 +888,10 @@ test_installer_no_root_no_sudo() {
 
     # Mock id to return non-root
     echo -e '#!/bin/bash\necho 1000' > "$TEST_BIN_DIR/id"
-    chmod +x "$TEST_BIN_DIR/id"
+    safe_make_test_executable "$TEST_BIN_DIR/id"
     # Mock sudo to fail
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/sudo"
-    chmod +x "$TEST_BIN_DIR/sudo"
+    safe_make_test_executable "$TEST_BIN_DIR/sudo"
     # Mock node to be missing
     rm -f "$TEST_BIN_DIR/node"
 
@@ -841,7 +914,7 @@ test_installer_bootstrap_update_fail() {
     rm -f "$TEST_BIN_DIR/node" # trigger install
     # Mock apt-get update to fail during update
     echo -e '#!/bin/bash\nif [[ "$*" == *"update"* ]]; then exit 1; fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -860,7 +933,7 @@ test_installer_bootstrap_install_fail() {
     rm -f "$TEST_BIN_DIR/node" # trigger install
     # Mock apt-get install to fail
     echo -e '#!/bin/bash\nif [[ "$*" == *"install"* ]]; then exit 1; fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -878,7 +951,7 @@ test_installer_curl_fail() {
     setup_success_mocks
     rm -f "$TEST_BIN_DIR/node" # trigger install
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/curl"
-    chmod +x "$TEST_BIN_DIR/curl"
+    safe_make_test_executable "$TEST_BIN_DIR/curl"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -896,7 +969,7 @@ test_installer_gpg_fail() {
     setup_success_mocks
     rm -f "$TEST_BIN_DIR/node" # trigger install
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/gpg"
-    chmod +x "$TEST_BIN_DIR/gpg"
+    safe_make_test_executable "$TEST_BIN_DIR/gpg"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -914,7 +987,7 @@ test_installer_mktemp_fail() {
     setup_success_mocks
     rm -f "$TEST_BIN_DIR/node" # trigger install
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/mktemp"
-    chmod +x "$TEST_BIN_DIR/mktemp"
+    safe_make_test_executable "$TEST_BIN_DIR/mktemp"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -934,7 +1007,7 @@ test_installer_keyring_backup_fail() {
     touch "$WATSUP_KEYRING_DIR/nodesource.gpg"
     # Make cp fail
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/cp"
-    chmod +x "$TEST_BIN_DIR/cp"
+    safe_make_test_executable "$TEST_BIN_DIR/cp"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -954,7 +1027,7 @@ test_installer_sourcelist_backup_fail() {
     touch "$WATSUP_NODESOURCE_LIST"
     # Make cp fail
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/cp"
-    chmod +x "$TEST_BIN_DIR/cp"
+    safe_make_test_executable "$TEST_BIN_DIR/cp"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -985,7 +1058,7 @@ fi
 PATH="$SYSTEM_PATH" cp "$2" "$3" 2>/dev/null || PATH="$SYSTEM_PATH" cp "$1" "$2" 2>/dev/null
 exit 0
 EOF
-    chmod +x "$TEST_BIN_DIR/install"
+    safe_make_test_executable "$TEST_BIN_DIR/install"
 
     # Assert failure mock rejects /etc/hosts with exit status 99
     "$TEST_BIN_DIR/install" "/etc/hosts" &>/dev/null
@@ -1020,7 +1093,7 @@ fi
 PATH="$SYSTEM_PATH" cp "$2" "$3" 2>/dev/null || PATH="$SYSTEM_PATH" cp "$1" "$2" 2>/dev/null
 exit 0
 EOF
-    chmod +x "$TEST_BIN_DIR/install"
+    safe_make_test_executable "$TEST_BIN_DIR/install"
 
     # Assert failure mock rejects /etc/hosts with exit status 99
     "$TEST_BIN_DIR/install" "/etc/hosts" &>/dev/null
@@ -1042,7 +1115,7 @@ test_installer_chmod_fail() {
     setup_success_mocks
     rm -f "$TEST_BIN_DIR/node" # trigger install
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/chmod"
-    chmod +x "$TEST_BIN_DIR/chmod"
+    safe_make_test_executable "$TEST_BIN_DIR/chmod"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1063,7 +1136,7 @@ test_installer_nodesource_update_fail() {
     echo -e '#!/bin/bash\nif [[ "$*" == *"update"* ]]; then\n  if [ -f '"$TEST_TEMP_DIR/bootstrap_done"'
   ]; then exit 1; else touch '"$TEST_TEMP_DIR/bootstrap_done"'
   fi\nfi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1083,7 +1156,7 @@ test_installer_nodejs_apt_fail() {
     rm -f "$TEST_BIN_DIR/node" # trigger install
     # Mock apt-get install nodejs to fail
     echo -e '#!/bin/bash\nif [[ "$*" == *"install -y nodejs"* ]]; then exit 1; fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1102,7 +1175,7 @@ test_installer_post_install_node_missing() {
     rm -f "$TEST_BIN_DIR/node" # trigger install
     # Mock apt-get install to NOT create node
     echo -e '#!/bin/bash\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1122,9 +1195,9 @@ test_installer_post_install_npm_missing() {
     rm -f "$TEST_BIN_DIR/npm"  # ensure npm is missing post-install
     # Mock apt-get install to create node but NOT npm
     echo -e '#!/bin/bash\nif [[ "$*" == *"install -y nodejs"* ]]; then\n  echo -e "#!/bin/bash\necho v20.0.0" > '"$TEST_BIN_DIR/node"'
-  chmod +x '"$TEST_BIN_DIR/node"'
+  safe_make_test_executable '"$TEST_BIN_DIR/node"'
 fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1143,9 +1216,9 @@ test_installer_post_install_node_v16() {
     rm -f "$TEST_BIN_DIR/node" # trigger install
     # Mock apt-get install to create Node v16
     echo -e '#!/bin/bash\nif [[ "$*" == *"install -y nodejs"* ]]; then\n  echo -e "#!/bin/bash\necho v16.0.0" > '"$TEST_BIN_DIR/node"'
-  chmod +x '"$TEST_BIN_DIR/node"'
+  safe_make_test_executable '"$TEST_BIN_DIR/node"'
 fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1168,7 +1241,7 @@ test_installer_rollback_success() {
 
     # Make nodesource install fail to trigger rollback
     echo -e '#!/bin/bash\nif [[ "$*" == *"install -y nodejs"* ]]; then exit 1; fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1201,7 +1274,7 @@ test_installer_rollback_success_non_root() {
 
     # Mock id to return 1000 (non-root)
     echo -e '#!/bin/bash\necho "id $*" >> '"$TEST_TEMP_DIR/mock_calls.log"'\necho 1000' > "$TEST_BIN_DIR/id"
-    chmod +x "$TEST_BIN_DIR/id"
+    safe_make_test_executable "$TEST_BIN_DIR/id"
 
     # Mock sudo to allow running install and rm mocks safely (using SYSTEM_PATH or direct call)
     cat << 'EOF' > "$TEST_BIN_DIR/sudo"
@@ -1215,14 +1288,14 @@ while [[ "$1" == -* ]]; do
 done
 "$@"
 EOF
-    chmod +x "$TEST_BIN_DIR/sudo"
+    safe_make_test_executable "$TEST_BIN_DIR/sudo"
 
     echo "key_content_a" > "$WATSUP_KEYRING_DIR/nodesource.gpg"
     echo "list_content_b" > "$WATSUP_NODESOURCE_LIST"
 
     # Make nodesource install fail to trigger rollback
     echo -e '#!/bin/bash\nif [[ "$*" == *"install -y nodejs"* ]]; then exit 1; fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1280,7 +1353,7 @@ fi
 PATH="$SYSTEM_PATH" cp "$2" "$3" 2>/dev/null || PATH="$SYSTEM_PATH" cp "$1" "$2" 2>/dev/null
 exit 0
 EOF
-    chmod +x "$TEST_BIN_DIR/install"
+    safe_make_test_executable "$TEST_BIN_DIR/install"
 
     # Assert failure mock rejects /etc/hosts with exit status 99
     "$TEST_BIN_DIR/install" "/etc/hosts" &>/dev/null
@@ -1288,7 +1361,7 @@ EOF
 
     # Mock nodejs install to fail
     echo -e '#!/bin/bash\nif [[ "$*" == *"install -y nodejs"* ]]; then exit 1; fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1333,7 +1406,7 @@ test_installer_repair_reinstall() {
 
     # node exists, npm missing
     echo -e '#!/bin/bash\necho "v20.0.0"' > "$TEST_BIN_DIR/node"
-    chmod +x "$TEST_BIN_DIR/node"
+    safe_make_test_executable "$TEST_BIN_DIR/node"
     rm -f "$TEST_BIN_DIR/npm"
 
     # Pre-populate apt_calls.log
@@ -1341,11 +1414,14 @@ test_installer_repair_reinstall() {
 
     # Mock node/npm presence after repair success AND record calls
     echo -e '#!/bin/bash\necho "apt-get $*" >> '"$TEST_TEMP_DIR/apt_calls.log"'\nif [[ "$*" == *"install -y --reinstall nodejs"* ]]; then\n  echo -e "#!/bin/bash\\nexit 0" > '"$TEST_BIN_DIR/npm"'
-  chmod +x '"$TEST_BIN_DIR/npm"'
+  safe_make_test_executable '"$TEST_BIN_DIR/npm"'
 fi\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     ( safe_cleanup_test_root() { :; }; install_prerequisites ) || assert_test_fail
+
+    # Assert npm mock exists and is executable
+    [ -x "$TEST_BIN_DIR/npm" ] || assert_test_fail
 
     if ! grep -q "apt-get install -y --reinstall nodejs" "$TEST_TEMP_DIR/apt_calls.log"; then
         echo "❌ Repair did not trigger --reinstall nodejs!"
@@ -1368,12 +1444,12 @@ test_installer_repair_failure_flow() {
 
     # node exists, npm missing
     echo -e '#!/bin/bash\necho "v20.0.0"' > "$TEST_BIN_DIR/node"
-    chmod +x "$TEST_BIN_DIR/node"
+    safe_make_test_executable "$TEST_BIN_DIR/node"
     rm -f "$TEST_BIN_DIR/npm"
 
     # Mock repair to do nothing (so npm is still missing after repair)
     echo -e '#!/bin/bash\nexit 0' > "$TEST_BIN_DIR/apt-get"
-    chmod +x "$TEST_BIN_DIR/apt-get"
+    safe_make_test_executable "$TEST_BIN_DIR/apt-get"
 
     local output
     output=$(safe_cleanup_test_root() { :; }; install_prerequisites 2>&1)
@@ -1395,7 +1471,7 @@ test_log_rotation_cp_failure() {
     echo "old_log_content" > "$WATSUP_LOG_PATH"
     # Make cp fail
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/cp"
-    chmod +x "$TEST_BIN_DIR/cp"
+    safe_make_test_executable "$TEST_BIN_DIR/cp"
 
     rotate_engine_log
     local status=$?
@@ -1416,7 +1492,7 @@ test_log_rotation_touch_failure() {
     echo "old_log_content" > "$WATSUP_LOG_PATH"
     # Make touch fail
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/touch"
-    chmod +x "$TEST_BIN_DIR/touch"
+    safe_make_test_executable "$TEST_BIN_DIR/touch"
 
     rotate_engine_log
     local status=$?
@@ -1437,7 +1513,7 @@ test_log_rotation_chmod_failure() {
     echo "old_log_content" > "$WATSUP_LOG_PATH"
     # Make chmod fail
     echo -e '#!/bin/bash\nexit 1' > "$TEST_BIN_DIR/chmod"
-    chmod +x "$TEST_BIN_DIR/chmod"
+    safe_make_test_executable "$TEST_BIN_DIR/chmod"
 
     rotate_engine_log
     local status=$?
@@ -1469,7 +1545,7 @@ if [[ "$*" == *"engine.log.1"* ]]; then
 fi
 PATH="$SYSTEM_PATH" mv "$@"
 EOF
-    chmod +x "$TEST_BIN_DIR/mv"
+    safe_make_test_executable "$TEST_BIN_DIR/mv"
 
     # Assert failure mock rejects /etc/hosts with exit status 99
     "$TEST_BIN_DIR/mv" "/etc/hosts" &>/dev/null
@@ -1504,7 +1580,7 @@ if [[ "$*" == *".tmp_bk_"* ]]; then
 fi
 PATH="$SYSTEM_PATH" mv "$@"
 EOF
-    chmod +x "$TEST_BIN_DIR/mv"
+    safe_make_test_executable "$TEST_BIN_DIR/mv"
 
     # Assert failure mock rejects /etc/hosts with exit status 99
     "$TEST_BIN_DIR/mv" "/etc/hosts" &>/dev/null
@@ -1539,7 +1615,7 @@ if [[ "$*" == *".tmp_act_"* ]]; then
 fi
 PATH="$SYSTEM_PATH" mv "$@"
 EOF
-    chmod +x "$TEST_BIN_DIR/mv"
+    safe_make_test_executable "$TEST_BIN_DIR/mv"
 
     # Assert failure mock rejects /etc/hosts with exit status 99
     "$TEST_BIN_DIR/mv" "/etc/hosts" &>/dev/null
@@ -1576,7 +1652,7 @@ if [[ "$1" == *".tmp_act_"* ]]; then
 fi
 PATH="$SYSTEM_PATH" mv "$@"
 EOF
-    chmod +x "$TEST_BIN_DIR/mv"
+    safe_make_test_executable "$TEST_BIN_DIR/mv"
 
     # Assert failure mock rejects /etc/hosts with exit status 99
     "$TEST_BIN_DIR/mv" "/etc/hosts" &>/dev/null
@@ -1629,7 +1705,7 @@ if [[ "$1" == *".tmp_old_"* ]]; then
 fi
 PATH="$SYSTEM_PATH" mv "$@"
 EOF
-    chmod +x "$TEST_BIN_DIR/mv"
+    safe_make_test_executable "$TEST_BIN_DIR/mv"
 
     # Assert failure mock rejects /etc/hosts with exit status 99
     "$TEST_BIN_DIR/mv" "/etc/hosts" &>/dev/null
@@ -1818,7 +1894,7 @@ test_npm_safety_matrix() {
 
     # Mock npm to succeed
     echo -e '#!/bin/bash\necho "npm $*" >> '"$TEST_TEMP_DIR/mock_calls.log"'\nexit 0' > "$TEST_BIN_DIR/npm"
-    chmod +x "$TEST_BIN_DIR/npm"
+    safe_make_test_executable "$TEST_BIN_DIR/npm"
 
     install_node_modules || assert_test_fail
 

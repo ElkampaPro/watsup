@@ -1077,6 +1077,8 @@ class WatsUpUI:
                 return result
             except Exception:
                 return {"success": False, "status_code": e.code, "error": f"HTTP Error {e.code}: {e.reason}"}
+            finally:
+                e.close()
         except urllib.error.URLError as e:
             return {"offline_flag": True, "error": str(e.reason if hasattr(e, 'reason') else e)}
         except Exception as e:
