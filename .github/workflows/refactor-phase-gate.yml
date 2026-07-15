@@ -1,0 +1,77 @@
+name: Refactor Phase Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'refactor/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 \
+            python3-tk \
+            python-is-python3 \
+            coreutils \
+            findutils \
+            curl \
+            lsof
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: System Diagnostics
+        run: |
+          node --version
+          python --version
+          uname -a
+
+      - name: Install Project Dependencies
+        run: npm ci
+
+      - name: Run All Linux Tests
+        run: PYTHONDONTWRITEBYTECODE=1 npm run test:all:linux
+
+      - name: Run Local Pipeline Benchmark
+        run: npm run benchmark:local
+
+      - name: Check Javascript Syntax (AST)
+        run: |
+          node --check engine.js
+          node --check test_engine.js
+          node --check test_contracts.js
+          node --check benchmarks/local_pipeline.js
+
+      - name: Check Python Syntax (AST)
+        run: python -c "import ast,pathlib; ast.parse(pathlib.Path('ui.py').read_text(encoding='utf-8'))"
+
+      - name: Check Bash Scripts Syntax
+        run: bash -n launch.sh launch_test.sh
+
+      - name: Validate Git Diff Whitespaces
+        run: git diff --check origin/main...HEAD
+
+      - name: Verify Docker Build
+        run: docker build --progress=plain -t watsup-phase0-ci .
