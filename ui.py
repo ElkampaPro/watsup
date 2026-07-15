@@ -1110,6 +1110,16 @@ if __name__ == "__main__":
         root = TkinterDnD.Tk()
     else:
         root = tk.Tk()
+
+    # Load and set application icon if watsup.png exists
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watsup.png")
+    if os.path.exists(icon_path):
+        try:
+            icon_img = tk.PhotoImage(file=icon_path)
+            root.iconphoto(True, icon_img)
+        except Exception:
+            pass
+
     app = WatsUpUI(root)
 
     # Elegant custom window closed hook
