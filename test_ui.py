@@ -297,21 +297,136 @@ class TestWatsUpUI(unittest.TestCase):
 
 class TestApiClient(unittest.TestCase):
     def test_import_safety(self):
-        # Verify that importing api_client has no side effects (no Tkinter, no threads, etc.)
+        # Verify that importing api_client has no side effects (no Tkinter, no network, etc.)
         import subprocess
-        code = "import sys, api_client; assert 'tkinter' not in sys.modules; print('ok')"
-        output = subprocess.check_output([sys.executable, "-c", code], text=True).strip()
-        self.assertEqual(output, "ok")
+
+        # We will write the verification code to a script and run it in a clean child process
+        # set its CWD to a temp directory
+        temp_dir = tempfile.mkdtemp()
+        try:
+            script_path = os.path.join(temp_dir, "verify_import.py")
+            # Get absolute path of api_client.py
+            api_client_abs = os.path.abspath("api_client.py")
+
+            script_code = f"""
+import sys
+import os
+import importlib.util
+import socket
+import urllib.request
+import threading
+import signal
+import builtins
+
+urlopen_called = False
+connect_called = False
+thread_start_called = False
+files_written = []
+
+# Mock urllib urlopen
+orig_urlopen = urllib.request.urlopen
+def mock_urlopen(*args, **kwargs):
+    global urlopen_called
+    urlopen_called = True
+    raise RuntimeError("urlopen called")
+urllib.request.urlopen = mock_urlopen
+
+# Mock socket connect
+orig_connect = socket.socket.connect
+def mock_connect(*args, **kwargs):
+    global connect_called
+    connect_called = True
+    raise RuntimeError("socket.connect called")
+socket.socket.connect = mock_connect
+
+# Mock socket create_connection
+orig_create_connection = socket.create_connection
+def mock_create_connection(*args, **kwargs):
+    global connect_called
+    connect_called = True
+    raise RuntimeError("socket.create_connection called")
+socket.create_connection = mock_create_connection
+
+# Mock threading Thread.start
+orig_thread_start = threading.Thread.start
+def mock_thread_start(*args, **kwargs):
+    global thread_start_called
+    thread_start_called = True
+    raise RuntimeError("Thread.start called")
+threading.Thread.start = mock_thread_start
+
+# Hook builtins.open to fail on write modes
+orig_open = builtins.open
+def mock_open(file, mode="r", *args, **kwargs):
+    if any(char in mode for char in ("w", "a", "x", "+")):
+        files_written.append((file, mode))
+        raise IOError("Write mode forbidden during import")
+    return orig_open(file, mode, *args, **kwargs)
+builtins.open = mock_open
+
+# Save signal handlers before import
+orig_sigint = signal.getsignal(signal.SIGINT)
+orig_sigterm = signal.getsignal(signal.SIGTERM)
+
+# Active threads count
+threads_before = threading.active_count()
+
+# Perform absolute path fresh import
+spec = importlib.util.spec_from_file_location("api_client", r"{api_client_abs}")
+module = importlib.util.module_from_spec(spec)
+sys.modules["api_client"] = module
+spec.loader.exec_module(module)
+
+# Assertions
+assert "tkinter" not in sys.modules, "Tkinter was imported"
+assert not urlopen_called, "urllib.request.urlopen was called"
+assert not connect_called, "socket connection was attempted"
+assert not thread_start_called, "thread start was called"
+assert threading.active_count() == threads_before, "new threads were created"
+assert signal.getsignal(signal.SIGINT) == orig_sigint, "SIGINT handler modified"
+assert signal.getsignal(signal.SIGTERM) == orig_sigterm, "SIGTERM handler modified"
+assert not files_written, f"files written: {{files_written}}"
+assert not [f for f in os.listdir(".") if f != "verify_import.py"], f"files created in cwd: {{[f for f in os.listdir('.') if f != 'verify_import.py']}}"
+
+print("ok")
+"""
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(script_code)
+
+            output = subprocess.check_output(
+                [sys.executable, script_path],
+                cwd=temp_dir,
+                text=True
+            ).strip()
+            self.assertEqual(output, "ok")
+        finally:
+            shutil.rmtree(temp_dir)
 
     def test_token_loading(self):
-        # 1. Valid file
+        import contextlib
+        import io
+
         temp_dir = tempfile.mkdtemp()
         try:
             token_path = os.path.join(temp_dir, ".watsup_ipc_token")
+            token_val = "my_secret_token_123"
             with open(token_path, "w", encoding="utf-8") as f:
-                f.write("  my_secret_token_123  \n")
-            token = api_client.load_ipc_token(token_path)
-            self.assertEqual(token, "my_secret_token_123")
+                f.write(f"  {token_val}  \n")
+
+            # Redirect stdout and stderr to verify no token leaks
+            f_out = io.StringIO()
+            f_err = io.StringIO()
+            with contextlib.redirect_stdout(f_out), contextlib.redirect_stderr(f_err):
+                token = api_client.load_ipc_token(token_path)
+
+            self.assertEqual(token, token_val)
+            # Ensure no leakage in stdout/stderr
+            out_val = f_out.getvalue()
+            err_val = f_err.getvalue()
+            self.assertNotIn(token_val, out_val)
+            self.assertNotIn(token_val, err_val)
+            self.assertEqual(out_val, "")
+            self.assertEqual(err_val, "")
 
             # 2. File not found
             self.assertIsNone(api_client.load_ipc_token(os.path.join(temp_dir, "nonexistent")))
@@ -329,10 +444,12 @@ class TestApiClient(unittest.TestCase):
         mock_response.__enter__.return_value = mock_response
         mock_opener.open.return_value = mock_response
 
+        # 1. Test with default base_url and custom data/token/timeout
         res = api_client.make_api_request(
             "/api/status",
             data={"filePath": "abc.txt"},
             ipc_token="xyz",
+            timeout=12,
             opener=mock_opener
         )
         self.assertEqual(res, {"success": True, "status": "ok"})
@@ -342,6 +459,18 @@ class TestApiClient(unittest.TestCase):
         self.assertEqual(req.headers.get("Content-type"), "application/json")
         self.assertEqual(req.headers.get("X-watsup-token"), "xyz")
         self.assertEqual(req.data, b'{"filePath": "abc.txt"}')
+        self.assertEqual(mock_opener.open.call_args[1].get("timeout"), 12)
+
+        # 2. Test with custom base_url
+        mock_opener.open.reset_mock()
+        res2 = api_client.make_api_request(
+            "/api/status",
+            base_url="https://custom-domain.com:9000",
+            opener=mock_opener
+        )
+        self.assertEqual(res2, {"success": True, "status": "ok"})
+        req2 = mock_opener.open.call_args[0][0]
+        self.assertEqual(req2.full_url, "https://custom-domain.com:9000/api/status")
 
     def test_http_error_json(self):
         mock_opener = MagicMock()

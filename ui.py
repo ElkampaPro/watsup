@@ -8,10 +8,7 @@ Consumes < 15MB RAM. Built entirely on standard Python modules (zero pip install
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import urllib.request
-import urllib.error
 import urllib.parse
-import json
 import os
 import threading
 import time
