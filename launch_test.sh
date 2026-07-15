@@ -1992,11 +1992,62 @@ test_npm_safety_matrix() {
     echo "✅ NPM Safety matrix passed!"
 }
 
+test_setup_desktop_shortcuts() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    echo "🧪 Running Test: setup_desktop_shortcuts Icon Selection..."
+    setup_success_mocks
+
+    local saved_app_dir="$APP_DIR"
+    local fake_app_dir="$TEST_TEMP_DIR/fake_app"
+    PATH="$SYSTEM_PATH" mkdir -p "$fake_app_dir"
+    export APP_DIR="$fake_app_dir"
+
+    # Reset destination folders inside sandbox HOME
+    PATH="$SYSTEM_PATH" rm -rf "$TEST_HOME_DIR/Desktop" "$TEST_HOME_DIR/.local"
+    PATH="$SYSTEM_PATH" mkdir -p "$TEST_HOME_DIR/Desktop"
+    PATH="$SYSTEM_PATH" mkdir -p "$TEST_HOME_DIR/.local/share/applications"
+
+    # CASE A: watsup.png is ABSENT -> fallbacks to system-run
+    setup_desktop_shortcuts
+
+    local shortcut_path="$TEST_HOME_DIR/Desktop/watsup.desktop"
+    if [ ! -f "$shortcut_path" ]; then
+        echo "❌ Desktop shortcut was not created!"
+        assert_test_fail
+    fi
+
+    local icon_val
+    icon_val=$(grep "^Icon=" "$shortcut_path" | cut -d= -f2)
+    if [ "$icon_val" != "system-run" ]; then
+        echo "❌ Expected fallback Icon=system-run, got '$icon_val'"
+        assert_test_fail
+    fi
+
+    # CASE B: watsup.png is PRESENT -> uses absolute path to watsup.png
+    PATH="$SYSTEM_PATH" touch "$fake_app_dir/watsup.png"
+    PATH="$SYSTEM_PATH" chmod +r "$fake_app_dir/watsup.png"
+
+    setup_desktop_shortcuts
+
+    icon_val=$(grep "^Icon=" "$shortcut_path" | cut -d= -f2)
+    if [ "$icon_val" != "$fake_app_dir/watsup.png" ]; then
+        echo "❌ Expected Icon=$fake_app_dir/watsup.png, got '$icon_val'"
+        assert_test_fail
+    fi
+
+    export APP_DIR="$saved_app_dir"
+    PATH="$SYSTEM_PATH" rm -rf "$fake_app_dir"
+
+    assert_test_pass
+    echo "✅ setup_desktop_shortcuts Icon Selection passed!"
+}
+
 # Run all test cases in order
 test_sandbox_safety_enforced_on_mocks
 test_nonexistent_evil_sibling_path_rejected
 test_verify_perms_unbound_safety
 test_stat_mock_queries_and_verify_perms
+test_setup_desktop_shortcuts
 test_sourcing_traps
 test_boundary_checks
 test_sourcing_fails_on_symlink_escape

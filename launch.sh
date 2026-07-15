@@ -838,6 +838,12 @@ setup_desktop_shortcuts() {
     mkdir -p "$desktop_path"
     mkdir -p "$menu_path"
 
+    local icon_val="system-run"
+    local icon_path="$APP_DIR/watsup.png"
+    if [ -f "$icon_path" ] && [ -r "$icon_path" ]; then
+        icon_val="$icon_path"
+    fi
+
     write_desktop_file() {
         echo "[Desktop Entry]"
         echo "Version=1.0"
@@ -845,7 +851,7 @@ setup_desktop_shortcuts() {
         echo "Name=WatsUp Streamer"
         echo "Comment=Zero-Browser WhatsApp Streamer for Heavy Files"
         echo "Exec=bash \"$APP_DIR/launch.sh\""
-        echo "Icon=system-run"
+        echo "Icon=$icon_val"
         echo "Path=$APP_DIR"
         echo "Terminal=true"
         echo "StartupNotify=false"

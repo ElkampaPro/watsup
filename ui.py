@@ -1116,9 +1116,10 @@ if __name__ == "__main__":
     if os.path.exists(icon_path):
         try:
             icon_img = tk.PhotoImage(file=icon_path)
+            root._watsup_icon = icon_img
             root.iconphoto(True, icon_img)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: Failed to load application icon: {str(e)[:100]}", flush=True)
 
     app = WatsUpUI(root)
 

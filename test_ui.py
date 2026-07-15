@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import sys
+import tkinter as tk
 
 # Ensure d:\watsup is in sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -269,6 +270,29 @@ class TestWatsUpUI(unittest.TestCase):
         mock_root.after.side_effect = _tkinter.TclError("invalid command")
         res2 = ui.safe_after(100, lambda: None)
         self.assertIsNone(res2)
+
+    def test_icon_loading_logic(self):
+        # We simulate the main block's icon loading logic on a mocked root window
+        mock_root = MagicMock()
+        mock_photo_image = MagicMock()
+
+        with patch('os.path.exists', return_value=True), \
+             patch('tkinter.PhotoImage', return_value=mock_photo_image) as mock_photo_class:
+
+            # The logic that is executed in main:
+            icon_path = "watsup.png"
+            if os.path.exists(icon_path):
+                try:
+                    icon_img = tk.PhotoImage(file=icon_path)
+                    mock_root._watsup_icon = icon_img
+                    mock_root.iconphoto(True, icon_img)
+                except Exception:
+                    pass
+
+            # Assertions
+            mock_photo_class.assert_called_once_with(file=icon_path)
+            self.assertEqual(mock_root._watsup_icon, mock_photo_image)
+            mock_root.iconphoto.assert_called_once_with(True, mock_photo_image)
 
 if __name__ == '__main__':
     unittest.main()

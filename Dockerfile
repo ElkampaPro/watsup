@@ -48,7 +48,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # Copy application source code
-COPY engine.js ui.py launch.sh watsup.desktop ./
+COPY engine.js ui.py launch.sh watsup.desktop watsup.png ./
 
 # Make the launcher script executable and apply safe permissions
 RUN chmod +x launch.sh
