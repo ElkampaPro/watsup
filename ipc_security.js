@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 const secureFs = require('./secure_fs.js');
 
@@ -9,9 +10,22 @@ function loadOrCreateToken(customTokenPath) {
         throw new Error('Critical: Secure IPC token could not be initialized: Token path must be specified.');
     }
 
-    let temporaryPath = null;
     try {
-        if (fs.existsSync(customTokenPath)) {
+        let fileStat;
+        try {
+            fileStat = fs.lstatSync(customTokenPath);
+        } catch (err) {
+            fileStat = null;
+        }
+
+        if (fileStat) {
+            if (fileStat.isSymbolicLink()) {
+                throw new Error('Token path target cannot be a symbolic link.');
+            }
+            if (!fileStat.isFile()) {
+                throw new Error('Token path target must be a regular file.');
+            }
+
             const existingToken = fs.readFileSync(customTokenPath, 'utf8').trim();
             if (TOKEN_PATTERN.test(existingToken)) {
                 fs.chmodSync(customTokenPath, 0o600);
@@ -20,22 +34,11 @@ function loadOrCreateToken(customTokenPath) {
         }
 
         const newToken = crypto.randomBytes(32).toString('hex');
-        const dir = require('path').dirname(customTokenPath);
-        temporaryPath = require('path').join(dir, `.watsup_temp_token_${crypto.randomBytes(4).toString('hex')}.tmp`);
-
-        secureFs.secureAtomicWriteFile(temporaryPath, newToken, { encoding: 'utf8' });
-        fs.chmodSync(temporaryPath, 0o600);
-        fs.renameSync(temporaryPath, customTokenPath);
-        temporaryPath = null;
+        secureFs.secureAtomicWriteFile(customTokenPath, newToken, { encoding: 'utf8' });
         fs.chmodSync(customTokenPath, 0o600);
-
         return newToken;
     } catch (err) {
         throw new Error(`Critical: Secure IPC token could not be initialized: ${err.message}`);
-    } finally {
-        if (temporaryPath && fs.existsSync(temporaryPath)) {
-            try { fs.unlinkSync(temporaryPath); } catch (e) {}
-        }
     }
 }
 

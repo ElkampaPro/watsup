@@ -78,4 +78,4 @@ jobs:
         run: git diff --check origin/main...HEAD
 
       - name: Verify Docker Build
-        run: docker build --progress=plain -t watsup-phase0-ci .
+        run: docker build --progress=plain -t watsup-refactor-ci .

@@ -6,9 +6,7 @@
  */
 
 const express = require('express');
-const crypto = require('crypto');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
-const pino = require('pino');
 const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const fs = require('fs');
@@ -41,17 +39,7 @@ function handleBackgroundError(reason, logger = console) {
     }
 }
 
-// Global process safety handlers to catch any Baileys internal async errors
-process.on('unhandledRejection', (reason, promise) => {
-    handleBackgroundError(reason);
-});
-process.on('uncaughtException', (err) => {
-    console.error('[Engine] Uncaught Exception:', formatErrorBriefly(err));
-    if (err && typeof err === 'object') {
-        const sanitizedErr = sanitizePayload(err);
-        console.error('[Engine] Sanitized Exception Payload:', JSON.stringify(sanitizedErr));
-    }
-});
+
 
 const PORT = 5001;
 
@@ -646,6 +634,17 @@ function createApp(config = {}) {
 }
 
 function startEngine() {
+    process.on('unhandledRejection', (reason, promise) => {
+        handleBackgroundError(reason);
+    });
+    process.on('uncaughtException', (err) => {
+        console.error('[Engine] Uncaught Exception:', formatErrorBriefly(err));
+        if (err && typeof err === 'object') {
+            const sanitizedErr = sanitizePayload(err);
+            console.error('[Engine] Sanitized Exception Payload:', JSON.stringify(sanitizedErr));
+        }
+    });
+
     if (process.platform !== 'win32') {
         process.umask(0o077);
     }
