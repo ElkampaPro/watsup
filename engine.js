@@ -279,10 +279,12 @@ function loadContactsCache() {
 /**
  * Saves current memory contacts map to disk cache
  */
-function saveContactsCache() {
+function saveContactsCache(overrideContactsMap, overrideCachePath) {
+    const activeContactsMap = overrideContactsMap || contactsMap;
+    const activeCachePath = overrideCachePath || cachePath;
     try {
-        const cachedList = Array.from(contactsMap.values());
-        secureAtomicWriteJson(cachePath, cachedList);
+        const cachedList = Array.from(activeContactsMap.values());
+        secureAtomicWriteJson(activeCachePath, cachedList);
     } catch (err) {
         console.error('[Cache] Error writing contacts cache:', err);
     }
@@ -574,9 +576,11 @@ async function connectToWhatsApp() {
 }
 
 let lastGroupSyncTime = 0;
-async function fetchGroupsList() {
+async function fetchGroupsList(overrideContactsMap, overrideCachePath) {
     if (!sock || connectionState.status !== 'connected') return;
     const myGen = currentSocketGeneration;
+    const activeContactsMap = overrideContactsMap || contactsMap;
+    const activeCachePath = overrideCachePath || cachePath;
 
     if (currentGroupSyncPromise && currentGroupSyncPromiseGen === myGen) {
         return currentGroupSyncPromise;
@@ -599,16 +603,30 @@ async function fetchGroupsList() {
             }
 
             let updated = false;
+
+            // 1. Delete stale groups ending in @g.us not returned by server
+            for (const [jid, contact] of activeContactsMap.entries()) {
+                if (jid.endsWith('@g.us') && !groups[jid]) {
+                    activeContactsMap.delete(jid);
+                    updated = true;
+                }
+            }
+
+            // 2. Add or update current groups
             for (const jid in groups) {
                 const group = groups[jid];
-                const name = `👥 [Group] ${group.subject}`;
-                contactsMap.set(jid, { id: jid, name });
-                updated = true;
+                const expectedName = `👥 [Group] ${group.subject}`;
+                const existing = activeContactsMap.get(jid);
+                if (!existing || existing.name !== expectedName) {
+                    activeContactsMap.set(jid, { id: jid, name: expectedName });
+                    updated = true;
+                }
             }
+
             if (updated) {
-                saveContactsCache();
-                console.log(`[Engine] Synced ${Object.keys(groups).length} WhatsApp groups successfully.`);
+                saveContactsCache(activeContactsMap, activeCachePath);
             }
+            console.log(`[Engine] Synced ${Object.keys(groups).length} WhatsApp groups successfully.`);
             lastSyncedGeneration = myGen;
             connectionState.groupsSynced = true;
         } catch (err) {
@@ -636,7 +654,8 @@ function createApp(config = {}) {
     const activeState = config.connectionState || connectionState;
     const getActiveSock = config.getSock || (() => sock);
     const activeContacts = config.contactsMap || contactsMap;
-    const syncGroups = config.fetchGroupsList || fetchGroupsList;
+    const activeCachePath = config.cachePath || cachePath;
+    const syncGroups = config.fetchGroupsList || (() => fetchGroupsList(activeContacts, activeCachePath));
     const clearAuth = config.deleteAuthFolder || deleteAuthFolder;
 
     if (!TOKEN_PATTERN.test(activeToken)) {

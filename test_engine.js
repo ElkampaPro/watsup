@@ -445,6 +445,10 @@ test('formatErrorBriefly redacts keys, sessions, tokens, and raw buffers', () =>
 
 
 test('fetchGroupsList deduplicates concurrent group sync requests', async () => {
+    const cachePath = path.join(__dirname, 'contacts_cache.json');
+    const originalCacheExists = fs.existsSync(cachePath);
+    const originalCacheContent = originalCacheExists ? fs.readFileSync(cachePath) : null;
+
     // Reset internal state
     const state = getConnectionState();
     state.status = 'connected';
@@ -452,6 +456,10 @@ test('fetchGroupsList deduplicates concurrent group sync requests', async () => 
     setSocketGeneration(10);
     setLastSyncedGeneration(-1);
     setCurrentGroupSyncPromiseGen(-1);
+
+    const testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-contacts-test-'));
+    const testCachePath = path.join(testTempDir, 'contacts_cache.json');
+    const testContactsMap = new Map();
 
     let fetchCount = 0;
     const mockSock = {
@@ -463,18 +471,39 @@ test('fetchGroupsList deduplicates concurrent group sync requests', async () => 
     };
     setSock(mockSock);
 
-    // Call fetchGroupsList concurrently
-    const p1 = fetchGroupsList();
-    const p2 = fetchGroupsList();
-    const p3 = fetchGroupsList();
+    // Call fetchGroupsList concurrently passing isolated dependencies
+    const p1 = fetchGroupsList(testContactsMap, testCachePath);
+    const p2 = fetchGroupsList(testContactsMap, testCachePath);
+    const p3 = fetchGroupsList(testContactsMap, testCachePath);
 
     await Promise.all([p1, p2, p3]);
 
     assert.equal(fetchCount, 1, 'groupFetchAllParticipating must be called exactly once.');
     assert.equal(getLastSyncedGeneration(), 10, 'lastSyncedGeneration must be set to current socket generation.');
+
+    // Assert isolated cache was written to correctly
+    assert.ok(fs.existsSync(testCachePath), 'Isolated test cache file must exist');
+    const testCacheData = JSON.parse(fs.readFileSync(testCachePath, 'utf8'));
+    assert.equal(testCacheData.length, 1, 'Test cache must contain exactly 1 entry');
+    assert.equal(testCacheData[0].id, '123@g.us', 'Group JID match');
+
+    // Assert no leakage to production contacts_cache.json
+    if (originalCacheExists) {
+        assert.ok(fs.existsSync(cachePath), 'Production cache must still exist');
+        assert.deepEqual(fs.readFileSync(cachePath), originalCacheContent, 'Production cache content must be unchanged');
+    } else {
+        assert.ok(!fs.existsSync(cachePath), 'Production cache must not have been created');
+    }
+
+    // Clean up test temp dir
+    fs.rmSync(testTempDir, { recursive: true, force: true });
 });
 
 test('fetchGroupsList allows new sync on reconnect socket generation change and discards outdated results', async () => {
+    const cachePath = path.join(__dirname, 'contacts_cache.json');
+    const originalCacheExists = fs.existsSync(cachePath);
+    const originalCacheContent = originalCacheExists ? fs.readFileSync(cachePath) : null;
+
     // Reset internal state
     const state = getConnectionState();
     state.status = 'connected';
@@ -482,6 +511,10 @@ test('fetchGroupsList allows new sync on reconnect socket generation change and 
     setSocketGeneration(20);
     setLastSyncedGeneration(-1);
     setCurrentGroupSyncPromiseGen(-1);
+
+    const testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-contacts-test-'));
+    const testCachePath = path.join(testTempDir, 'contacts_cache.json');
+    const testContactsMap = new Map();
 
     let resolveFetchPromise;
     const fetchPromise = new Promise((resolve) => {
@@ -498,8 +531,8 @@ test('fetchGroupsList allows new sync on reconnect socket generation change and 
     };
     setSock(mockSock1);
 
-    // Start sync 1 (socket generation 20)
-    const p1 = fetchGroupsList();
+    // Start sync 1 (socket generation 20) with isolated dependencies
+    const p1 = fetchGroupsList(testContactsMap, testCachePath);
 
     // Now simulate reconnect (socket generation changes to 21)
     setSocketGeneration(21);
@@ -513,8 +546,8 @@ test('fetchGroupsList allows new sync on reconnect socket generation change and 
     };
     setSock(mockSock2);
 
-    // Start sync 2 (socket generation 21)
-    const p2 = fetchGroupsList();
+    // Start sync 2 (socket generation 21) with isolated dependencies
+    const p2 = fetchGroupsList(testContactsMap, testCachePath);
 
     // Resolve first sync promise
     resolveFetchPromise();
@@ -524,6 +557,115 @@ test('fetchGroupsList allows new sync on reconnect socket generation change and 
     assert.equal(fetchCount, 1, 'First mock socket fetch must be called.');
     assert.equal(fetchCount2, 1, 'Second mock socket fetch must be called.');
     assert.equal(getLastSyncedGeneration(), 21, 'lastSyncedGeneration should reflect the latest successful generation.');
+
+    // Assert only the fresh group (from generation 21) was saved to the test cache
+    assert.ok(fs.existsSync(testCachePath), 'Isolated test cache file must exist');
+    const testCacheData = JSON.parse(fs.readFileSync(testCachePath, 'utf8'));
+    assert.equal(testCacheData.length, 1, 'Test cache must contain exactly 1 entry');
+    assert.equal(testCacheData[0].id, '888@g.us', 'Should only keep Fresh Group from generation 21');
+    assert.equal(testCacheData[0].name, '👥 [Group] Fresh Group', 'Name match');
+
+    // Assert no leakage to production contacts_cache.json
+    if (originalCacheExists) {
+        assert.ok(fs.existsSync(cachePath), 'Production cache must still exist');
+        assert.deepEqual(fs.readFileSync(cachePath), originalCacheContent, 'Production cache content must be unchanged');
+    } else {
+        assert.ok(!fs.existsSync(cachePath), 'Production cache must not have been created');
+    }
+
+    // Clean up test temp dir
+    fs.rmSync(testTempDir, { recursive: true, force: true });
+});
+
+test('fetchGroupsList authoritative sync and stale group pruning', async () => {
+    const cachePath = path.join(__dirname, 'contacts_cache.json');
+    const originalCacheExists = fs.existsSync(cachePath);
+    const originalCacheContent = originalCacheExists ? fs.readFileSync(cachePath) : null;
+
+    const testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-contacts-prune-'));
+    const testCachePath = path.join(testTempDir, 'contacts_cache.json');
+
+    const testContactsMap = new Map();
+    testContactsMap.set('111@s.whatsapp.net', { id: '111@s.whatsapp.net', name: '👤 John Doe' });
+    testContactsMap.set('old-group@g.us', { id: 'old-group@g.us', name: '👥 [Group] Old Group' });
+    testContactsMap.set('keep-group@g.us', { id: 'keep-group@g.us', name: '👥 [Group] Keep Group' });
+
+    const state = getConnectionState();
+    state.status = 'connected';
+    state.groupsSynced = false;
+    setSocketGeneration(30);
+    setLastSyncedGeneration(-1);
+    setCurrentGroupSyncPromiseGen(-1);
+
+    // 1. Sync returns only keep-group (updated) and a new-group
+    const mockSock = {
+        groupFetchAllParticipating: async () => {
+            return {
+                'keep-group@g.us': { subject: 'Keep Group Updated' },
+                'new-group@g.us': { subject: 'New Group' }
+            };
+        }
+    };
+    setSock(mockSock);
+
+    await fetchGroupsList(testContactsMap, testCachePath);
+
+    // Assertions:
+    assert.ok(testContactsMap.has('111@s.whatsapp.net'), 'Personal contact must remain');
+    assert.ok(!testContactsMap.has('old-group@g.us'), 'Stale group must be pruned');
+    assert.equal(testContactsMap.get('keep-group@g.us').name, '👥 [Group] Keep Group Updated', 'Keep group subject must be updated');
+    assert.ok(testContactsMap.has('new-group@g.us'), 'New group must be added');
+
+    // Assert cache was written
+    assert.ok(fs.existsSync(testCachePath), 'Test cache must exist');
+    let testCacheData = JSON.parse(fs.readFileSync(testCachePath, 'utf8'));
+    assert.equal(testCacheData.length, 3, 'Cache must contain exactly 3 contacts');
+
+    // 2. Test empty groups result -> prunes all groups
+    setSocketGeneration(31);
+    setSock({
+        groupFetchAllParticipating: async () => {
+            return {};
+        }
+    });
+    await fetchGroupsList(testContactsMap, testCachePath);
+    assert.equal(testContactsMap.size, 1, 'Only 1 contact should remain in the map');
+    assert.ok(testContactsMap.has('111@s.whatsapp.net'), 'Personal contact must remain');
+
+    // 3. Test outdated generation -> does not modify or write anything
+    testContactsMap.set('another-group@g.us', { id: 'another-group@g.us', name: '👥 [Group] Another Group' });
+    const cachedList = Array.from(testContactsMap.values());
+    fs.writeFileSync(testCachePath, JSON.stringify(cachedList), 'utf8');
+    const testCacheBeforeOutdated = fs.readFileSync(testCachePath, 'utf8');
+
+    setSocketGeneration(32);
+    let resolveOutdated;
+    const outdatedPromise = new Promise((resolve) => { resolveOutdated = resolve; });
+    setSock({
+        groupFetchAllParticipating: async () => {
+            await outdatedPromise;
+            return { 'new-outdated-group@g.us': { subject: 'Outdated Group' } };
+        }
+    });
+
+    const pOutdated = fetchGroupsList(testContactsMap, testCachePath);
+    setSocketGeneration(33);
+    resolveOutdated();
+    await pOutdated;
+
+    assert.ok(!testContactsMap.has('new-outdated-group@g.us'), 'Outdated group must not be added to map');
+    assert.equal(fs.readFileSync(testCachePath, 'utf8'), testCacheBeforeOutdated, 'Cache must not be modified by outdated sync');
+
+    // Assert no leakage to production contacts_cache.json
+    if (originalCacheExists) {
+        assert.ok(fs.existsSync(cachePath), 'Production cache must still exist');
+        assert.deepEqual(fs.readFileSync(cachePath), originalCacheContent, 'Production cache content must be unchanged');
+    } else {
+        assert.ok(!fs.existsSync(cachePath), 'Production cache must not have been created');
+    }
+
+    // Clean up test temp dir
+    fs.rmSync(testTempDir, { recursive: true, force: true });
 });
 
 test('POST /api/send transition progress phases correctly', async () => {
