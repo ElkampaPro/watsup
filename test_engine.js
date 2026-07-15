@@ -751,6 +751,10 @@ test('POST /api/send handles sendMessage failure and releases lock', async () =>
         getSock: () => ({
             sendMessage: async (jid, content) => {
                 content.document.stream.resume();
+                await new Promise((resolve) => {
+                    content.document.stream.on('end', resolve);
+                    content.document.stream.on('error', resolve);
+                });
                 throw new Error('Socket closed abruptly');
             }
         })
@@ -778,6 +782,10 @@ test('POST /api/send handles sendMessage failure and releases lock', async () =>
             getSock: () => ({
                 sendMessage: async (jid, content) => {
                     content.document.stream.resume();
+                    await new Promise((resolve) => {
+                        content.document.stream.on('end', resolve);
+                        content.document.stream.on('error', resolve);
+                    });
                     return { key: { id: 'msg456' } };
                 }
             })
