@@ -6,7 +6,7 @@ const { createApp } = require('../engine.js');
 
 function makeRequest(port, requestPath, method = 'GET', token = null, body = null) {
     return new Promise((resolve, reject) => {
-        const headers = {};
+        const headers = { 'Connection': 'close' };
         if (token) headers['X-WatsUp-Token'] = token;
         if (body) headers['Content-Type'] = 'application/json';
 
@@ -44,11 +44,16 @@ async function runBenchmark() {
     const token = 'a'.repeat(64);
     const mockState = { status: 'connected', userInfo: null, qrAvailable: false, groupsSynced: true };
     const mockContactsMap = new Map();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-bench-'));
+    const tempFile = path.join(tempDir, 'bench_100mb.bin');
 
     const app = createApp({
         ipcToken: token,
         connectionState: mockState,
         contactsMap: mockContactsMap,
+        cachePath: path.join(tempDir, 'contacts_cache.json'),
+        deleteAuthFolder: () => {},
+        fetchGroupsList: async () => [],
         getSock: () => ({
             sendMessage: async (jid, content) => {
                 const stream = content.document.stream;
@@ -64,20 +69,23 @@ async function runBenchmark() {
 
     const { server, port } = await listen(app);
 
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-bench-'));
-    const tempFile = path.join(tempDir, 'bench_10mb.bin');
-
-    // Generate 10MB file
-    const buffer = Buffer.alloc(1 * 1024 * 1024); // 1MB chunk
-    const writeStream = fs.createWriteStream(tempFile);
-    for (let i = 0; i < 10; i++) {
-        writeStream.write(buffer);
-    }
-    await new Promise(r => writeStream.end(r));
-
-    const durations = [];
-    console.log('Running 5 benchmark rounds via Local API pipeline...');
     try {
+        // Generate 100MB file (10 * 10MB chunks)
+        const buffer = Buffer.alloc(10 * 1024 * 1024);
+        const writeStream = fs.createWriteStream(tempFile);
+        for (let i = 0; i < 10; i++) {
+            writeStream.write(buffer);
+        }
+        await new Promise(r => writeStream.end(r));
+
+        console.log('Running 1 warm-up round (ignored)...');
+        await makeRequest(port, '/api/send', 'POST', token, {
+            filePath: tempFile,
+            recipient: '1234567890@s.whatsapp.net'
+        });
+
+        const durations = [];
+        console.log('Running 5 benchmark rounds via Local API pipeline...');
         for (let round = 1; round <= 5; round++) {
             const start = process.hrtime.bigint();
             const res = await makeRequest(port, '/api/send', 'POST', token, {
@@ -90,23 +98,26 @@ async function runBenchmark() {
             const end = process.hrtime.bigint();
             const durationMs = Number(end - start) / 1_000_000;
             durations.push(durationMs);
-            const speed = (10 / (durationMs / 1000)).toFixed(2);
+            const speed = (100 / (durationMs / 1000)).toFixed(2);
             console.log(`Round ${round}: ${durationMs.toFixed(2)} ms (${speed} MB/s)`);
         }
 
         durations.sort((a, b) => a - b);
         const medianDuration = durations[2];
-        const medianSpeed = (10 / (medianDuration / 1000)).toFixed(2);
+        const medianSpeed = (100 / (medianDuration / 1000)).toFixed(2);
 
         console.log('\n--- Pipeline Benchmark Results ---');
         console.log(`Median Duration: ${medianDuration.toFixed(2)} ms`);
         console.log(`Median Throughput: ${medianSpeed} MB/s`);
     } finally {
-        // Cleanup
         try { fs.unlinkSync(tempFile); } catch (e) {}
+        try { fs.unlinkSync(path.join(tempDir, 'contacts_cache.json')); } catch (e) {}
         try { fs.rmdirSync(tempDir); } catch (e) {}
         await new Promise((resolve) => server.close(resolve));
     }
 }
 
-runBenchmark().catch(console.error);
+runBenchmark().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+});

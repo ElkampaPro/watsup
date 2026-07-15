@@ -58,6 +58,9 @@ async function closeServer(server) {
 
 // 1. Import Safety Test (Runs in fresh child process, mocks and verifies umask/file operations)
 test('Importing engine.js does not change umask, create files, or bind ports in a fresh process', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-contract-import-'));
+    const absoluteEnginePath = path.resolve(__dirname, 'engine.js').replace(/\\/g, '/');
+
     const script = `
         const fs = require('fs');
         const http = require('http');
@@ -81,7 +84,7 @@ test('Importing engine.js does not change umask, create files, or bind ports in 
             serverListening = true;
             return origListen(...args);
         };
-        require('./engine.js');
+        require('${absoluteEnginePath}');
         const finalUmask = process.umask ? process.umask() : 0;
         console.log(JSON.stringify({
             umaskMatches: initialUmask === finalUmask,
@@ -90,12 +93,22 @@ test('Importing engine.js does not change umask, create files, or bind ports in 
             serverListening
         }));
     `;
-    const output = cp.execSync('node -e "' + script.replace(/"/g, '\\"').replace(/\n/g, ' ') + '"', { encoding: 'utf8' }).trim();
-    const result = JSON.parse(output);
-    assert.equal(result.umaskMatches, true, 'Umask must remain unchanged');
-    assert.equal(result.fileCreated, false, 'No files must be created upon import');
-    assert.equal(result.dirCreated, false, 'No directories must be created upon import');
-    assert.equal(result.serverListening, false, 'No network ports must be opened upon import');
+
+    try {
+        const resultObj = cp.spawnSync(process.execPath, ['-e', script], {
+            cwd: tempDir,
+            encoding: 'utf8'
+        });
+
+        assert.equal(resultObj.status, 0, 'Exit status of the child process must be 0');
+        const result = JSON.parse(resultObj.stdout.trim());
+        assert.equal(result.umaskMatches, true, 'Umask must remain unchanged');
+        assert.equal(result.fileCreated, false, 'No files must be created upon import');
+        assert.equal(result.dirCreated, false, 'No directories must be created upon import');
+        assert.equal(result.serverListening, false, 'No network ports must be opened upon import');
+    } finally {
+        try { fs.rmdirSync(tempDir); } catch (e) {}
+    }
 });
 
 // 2. Concurrency, Locking, Isolation, and Error Release Test
@@ -170,18 +183,20 @@ test('createApp instances isolate progress and locks, and handle exceptions rele
             recipient: '1234567890@s.whatsapp.net'
         });
 
-        // Wait until App1 reports active status in progress
+        // Wait until App1 finishes streaming and enters awaiting_confirmation phase
         await waitUntil(async () => {
             const status = await makeRequest(s1.port, '/api/status', 'GET', token1);
-            return status.body.uploadProgress.active === true;
+            return status.body.uploadProgress.phase === 'awaiting_confirmation';
         });
 
         // Assert App1 progress structure snapshot matches schema and phase
         const status1 = await makeRequest(s1.port, '/api/status', 'GET', token1);
-        const allowedPhases = new Set(['streaming', 'awaiting_confirmation']);
-        assert.ok(allowedPhases.has(status1.body.uploadProgress.phase), 'Phase must be streaming or awaiting_confirmation');
+        assert.equal(status1.body.uploadProgress.phase, 'awaiting_confirmation');
         assert.equal(status1.body.uploadProgress.fileName, 'payload.bin');
         assert.equal(status1.body.uploadProgress.totalBytes, 13);
+
+        // Capture snapshot before subsequent requests B/C and validation failure
+        const snapshot = { ...status1.body.uploadProgress };
 
         // Assert App2 is not locked or affected (Complete Isolation)
         const status2 = await makeRequest(s2.port, '/api/status', 'GET', token2);
@@ -213,13 +228,20 @@ test('createApp instances isolate progress and locks, and handle exceptions rele
         });
         assert.equal(concurrentResAfterFail.statusCode, 409, 'Lock must be preserved after validation failure');
 
+        // Verify that A's progress snapshot remains unchanged
+        const status1AfterRequests = await makeRequest(s1.port, '/api/status', 'GET', token1);
+        const snapshotAfter = status1AfterRequests.body.uploadProgress;
+        assert.equal(snapshotAfter.active, snapshot.active);
+        assert.equal(snapshotAfter.fileName, snapshot.fileName);
+        assert.equal(snapshotAfter.bytesSent, snapshot.bytesSent);
+        assert.equal(snapshotAfter.totalBytes, snapshot.totalBytes);
+        assert.equal(snapshotAfter.phase, snapshot.phase);
+
+        // Fail the active socket operation to test exception rollback release logic
         rejectSendMessage(new Error('Mock socket failure'));
 
-        try {
-            await sendPromise1;
-        } catch (e) {
-            // Expected socket send failure
-        }
+        const resA = await sendPromise1;
+        assert.equal(resA.statusCode, 500, 'Request A must return HTTP 500 when mock socket fails');
 
         // Wait for lock release state
         await waitUntil(async () => {
