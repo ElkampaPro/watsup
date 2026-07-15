@@ -60,6 +60,10 @@ jobs:
       - name: Check Javascript Syntax (AST)
         run: |
           node --check engine.js
+          node --check secure_fs.js
+          node --check ipc_security.js
+          node --check logger.js
+          node --check jid_utils.js
           node --check test_engine.js
           node --check test_contracts.js
           node --check benchmarks/local_pipeline.js

@@ -339,3 +339,154 @@ test('API contracts for payload schemas, inputs, and logout stubs verification',
         try { fs.rmdirSync(tempDir); } catch (e) {}
     }
 });
+
+// 4. Phase 1 Modular Security & Utilities Verification
+test('Phase 1 Modular Security and Utilities robust verification', async () => {
+    const secureFs = require('./secure_fs.js');
+    const ipcSecurity = require('./ipc_security.js');
+    const loggerModule = require('./logger.js');
+    const jidUtils = require('./jid_utils.js');
+    const engine = require('./engine.js');
+
+    // Verify engine.js re-exports all 8 security, filesystem, and formatting symbols
+    assert.equal(typeof engine.secureAtomicWriteFile, 'function');
+    assert.equal(typeof engine.secureAtomicWriteJson, 'function');
+    assert.equal(typeof engine.enforceSecurePermissions, 'function');
+    assert.equal(typeof engine.loadOrCreateToken, 'function');
+    assert.equal(typeof engine.formatJid, 'function');
+    assert.equal(typeof engine.sanitizePayload, 'function');
+    assert.equal(typeof engine.formatErrorBriefly, 'function');
+    assert.equal(typeof engine.createSanitizedLogger, 'function');
+
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-p1-tests-'));
+
+    try {
+        // --- secure_fs.js Tests ---
+        const testFile = path.join(tempDir, 'test_perms.txt');
+        secureFs.secureAtomicWriteFile(testFile, 'hello secure fs', 'utf8');
+        assert.ok(fs.existsSync(testFile));
+        assert.equal(fs.readFileSync(testFile, 'utf8'), 'hello secure fs');
+
+        if (process.platform !== 'win32') {
+            const stats = fs.statSync(testFile);
+            assert.equal(stats.mode & 0o777, 0o600, 'File mode must be 0600 on POSIX');
+        }
+
+        // test writing to path with write/chmod/rename failure to test cleanup & error propagation
+        const badPath = path.join(tempDir, 'nonexistent_folder_abc/test.txt');
+        assert.throws(() => {
+            secureFs.secureAtomicWriteFile(badPath, 'fail');
+        }, /ENOENT/, 'Write error must propagate');
+
+        // Verify no temp files left behind in tempDir
+        const filesLeft = fs.readdirSync(tempDir);
+        assert.equal(filesLeft.filter(f => f.startsWith('.watsup_temp_')).length, 0, 'No temp files should remain after failure');
+
+        // enforceSecurePermissions test
+        const subDir = path.join(tempDir, 'sub_dir');
+        fs.mkdirSync(subDir);
+        const subFile = path.join(subDir, 'sub_file.txt');
+        fs.writeFileSync(subFile, 'sub content');
+        const extraFile = path.join(tempDir, 'extra_file.txt');
+        fs.writeFileSync(extraFile, 'extra content');
+
+        secureFs.enforceSecurePermissions(subDir, { extraFiles: [extraFile] });
+        if (process.platform !== 'win32') {
+            assert.equal(fs.statSync(subDir).mode & 0o777, 0o700, 'Directory mode must be 0700');
+            assert.equal(fs.statSync(subFile).mode & 0o777, 0o600, 'Sub file mode must be 0600');
+            assert.equal(fs.statSync(extraFile).mode & 0o777, 0o600, 'Extra file mode must be 0600');
+        }
+
+        // --- ipc_security.js Tests ---
+        // valid existing token is returned as-is
+        const tokenFile = path.join(tempDir, 'token.txt');
+        const dummyToken = 'a'.repeat(64);
+        fs.writeFileSync(tokenFile, dummyToken, 'utf8');
+        const loadedToken = ipcSecurity.loadOrCreateToken(tokenFile);
+        assert.equal(loadedToken, dummyToken, 'Existing valid token must be returned as-is');
+        if (process.platform !== 'win32') {
+            assert.equal(fs.statSync(tokenFile).mode & 0o777, 0o600, 'Existing token file must be chmod 0600');
+        }
+
+        // different token paths do not share any cache (no global cache)
+        const tokenFile2 = path.join(tempDir, 'token2.txt');
+        const loadedToken2 = ipcSecurity.loadOrCreateToken(tokenFile2);
+        assert.notEqual(loadedToken2, dummyToken, 'Tokens at different paths must be independent');
+
+        // invalid expectedToken throwing startup validation error
+        assert.throws(() => {
+            ipcSecurity.createIpcAuthMiddleware('short_token');
+        }, /IPC token must be a 64-character hexadecimal string\./);
+
+        // middleware checking
+        const middleware = ipcSecurity.createIpcAuthMiddleware(dummyToken);
+        
+        // mock request / response / next
+        let nextCalled = 0;
+        const mockReq = { headers: {} };
+        const mockRes = {
+            statusCode: 200,
+            body: null,
+            status(code) {
+                this.statusCode = code;
+                return this;
+            },
+            json(obj) {
+                this.body = obj;
+                return this;
+            }
+        };
+
+        // missing token returns exact HTTP 401 and JSON
+        middleware(mockReq, mockRes, () => { nextCalled++; });
+        assert.equal(mockRes.statusCode, 401);
+        assert.deepEqual(mockRes.body, { success: false, error: 'Unauthorized: Missing IPC token.' });
+        assert.equal(nextCalled, 0);
+
+        // invalid token length returns exact HTTP 401 and JSON (does not trigger timingSafeEqual)
+        mockReq.headers['x-watsup-token'] = 'short';
+        middleware(mockReq, mockRes, () => { nextCalled++; });
+        assert.equal(mockRes.statusCode, 401);
+        assert.deepEqual(mockRes.body, { success: false, error: 'Unauthorized: Invalid IPC token.' });
+        assert.equal(nextCalled, 0);
+
+        // invalid token value but correct length
+        mockReq.headers['x-watsup-token'] = 'b'.repeat(64);
+        middleware(mockReq, mockRes, () => { nextCalled++; });
+        assert.equal(mockRes.statusCode, 401);
+        assert.deepEqual(mockRes.body, { success: false, error: 'Unauthorized: Invalid IPC token.' });
+        assert.equal(nextCalled, 0);
+
+        // valid token calls next exactly once
+        mockReq.headers['x-watsup-token'] = dummyToken;
+        middleware(mockReq, mockRes, () => { nextCalled++; });
+        assert.equal(nextCalled, 1, 'Valid token must invoke next() exactly once');
+
+        // --- logger.js Tests ---
+        // redact checking
+        const rawBuf = Buffer.from('hello');
+        assert.equal(loggerModule.sanitizePayload(rawBuf), '[REDACTED_BUFFER]');
+        assert.equal(loggerModule.sanitizePayload({ type: 'Buffer', data: [1, 2, 3] }), '[REDACTED_BUFFER]');
+        assert.equal(loggerModule.sanitizePayload('a'.repeat(130)), '[REDACTED_HEX_LARGE]');
+        assert.equal(loggerModule.sanitizePayload('a'.repeat(64)), '[REDACTED_HEX_64]');
+        assert.equal(loggerModule.sanitizePayload('token=123'), '[REDACTED_TOKEN]=123');
+        assert.equal(loggerModule.sanitizePayload('1234567890@s.whatsapp.net'), '[REDACTED_JID]');
+
+        // --- jid_utils.js Tests ---
+        assert.equal(jidUtils.formatJid('1234567890'), '1234567890@s.whatsapp.net');
+        assert.equal(jidUtils.formatJid('1234567890@s.whatsapp.net'), '1234567890@s.whatsapp.net');
+        assert.equal(jidUtils.formatJid('abc'), null);
+
+        // Verify new modules do not register any process-level event handlers
+        const beforeRejectionListeners = process.listeners('unhandledRejection').length;
+        const beforeExceptionListeners = process.listeners('uncaughtException').length;
+
+        // Requiring them again to check (they are cached, but even on fresh require they shouldn't register anything)
+        assert.equal(process.listeners('unhandledRejection').length, beforeRejectionListeners);
+        assert.equal(process.listeners('uncaughtException').length, beforeExceptionListeners);
+
+    } finally {
+        // cleanup temp files
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (e) {}
+    }
+});

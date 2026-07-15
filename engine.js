@@ -15,79 +15,18 @@ const fs = require('fs');
 const path = require('path');
 const { Transform } = require('stream');
 
-function formatErrorBriefly(err) {
-    if (!err) return 'Unknown error';
-    let message = err.message || String(err);
-    message = message.replace(/[a-fA-F0-9]{64}/g, '[REDACTED_HEX_64]');
-    message = message.replace(/(?:session|token|qr|key)/gi, (m) => `[REDACTED_${m.toUpperCase()}]`);
-    const errorType = err.name || 'Error';
-    const statusCode = err.statusCode || (err.output && err.output.statusCode) || '';
-    const code = err.code || '';
-    let brief = `[${errorType}] ${message}`;
-    if (statusCode) brief += ` (Status: ${statusCode})`;
-    if (code) brief += ` (Code: ${code})`;
-    return brief;
-}
+// Import modularized utility functions
+const jidUtils = require('./jid_utils.js');
+const secureFs = require('./secure_fs.js');
+const ipcSecurity = require('./ipc_security.js');
+const loggerModule = require('./logger.js');
 
-function sanitizePayload(val, depth = 0) {
-    if (depth > 4) return '[REDACTED_MAX_DEPTH]';
-    if (val === null || val === undefined) return val;
-
-    // Check if it is a real Buffer
-    if (typeof val === 'object' && (Buffer.isBuffer(val) || val.constructor?.name === 'Buffer' || val._isBuffer)) {
-        return '[REDACTED_BUFFER]';
-    }
-
-    if (Array.isArray(val)) {
-        return val.map(item => sanitizePayload(item, depth + 1));
-    }
-
-    if (val instanceof Error) {
-        const sanitizedErr = {
-            name: val.name,
-            message: sanitizePayload(val.message, depth + 1),
-            statusCode: val.statusCode || (val.output && val.output.statusCode)
-        };
-        if (val.code) sanitizedErr.code = val.code;
-        return sanitizedErr;
-    }
-
-    if (typeof val === 'object') {
-        // Check if it represents serialized Buffer
-        if (val.type === 'Buffer' && Array.isArray(val.data)) {
-            return '[REDACTED_BUFFER]';
-        }
-        const sanitized = {};
-        for (const k of Object.keys(val)) {
-            const kl = k.toLowerCase();
-            if (kl === 'token' || kl === 'ipctoken' || kl === 'qr' || kl === 'key' || kl === 'session' || kl === 'raw' || kl === 'content') {
-                sanitized[k] = `[REDACTED_${k.toUpperCase()}]`;
-            } else {
-                sanitized[k] = sanitizePayload(val[k], depth + 1);
-            }
-        }
-        return sanitized;
-    }
-
-    if (typeof val === 'string') {
-        let msg = val;
-        // Redact large hex strings (>128 chars)
-        msg = msg.replace(/[a-fA-F0-9]{128,}/g, '[REDACTED_HEX_LARGE]');
-        // Redact 64-char hex tokens
-        msg = msg.replace(/[a-fA-F0-9]{64}/g, '[REDACTED_HEX_64]');
-        // Redact keywords
-        msg = msg.replace(/(?:session|token|qr|key)/gi, (m) => `[REDACTED_${m.toUpperCase()}]`);
-        // Redact node.content
-        msg = msg.replace(/node\.content/gi, '[REDACTED_NODE_CONTENT]');
-        // Redact buffer string patterns
-        msg = msg.replace(/Buffer\s*<[a-fA-F0-9\s]*>/gi, '[REDACTED_BUFFER]');
-        // Redact WhatsApp JIDs (full JID)
-        msg = msg.replace(/\b\d{5,20}@(s\.whatsapp\.net|g\.us|c\.us)\b/g, '[REDACTED_JID]');
-        return msg;
-    }
-
-    return val;
-}
+const formatJid = jidUtils.formatJid;
+const secureAtomicWriteFile = secureFs.secureAtomicWriteFile;
+const secureAtomicWriteJson = secureFs.secureAtomicWriteJson;
+const formatErrorBriefly = loggerModule.formatErrorBriefly;
+const sanitizePayload = loggerModule.sanitizePayload;
+const createSanitizedLogger = loggerModule.createSanitizedLogger;
 
 function handleBackgroundError(reason, logger = console) {
     const brief = formatErrorBriefly(reason);
@@ -100,38 +39,6 @@ function handleBackgroundError(reason, logger = console) {
             logger.error('[Engine] Sanitized Error Payload:', JSON.stringify(sanitizedReason));
         }
     }
-}
-
-function createSanitizedLogger(destination, options = {}) {
-    const defaultPaths = [
-        '*.content',
-        '*.raw',
-        '*.key',
-        '*.message.conversation',
-        '*.message.extendedTextMessage',
-        'token',
-        'ipcToken',
-        'qr'
-    ];
-
-    const pinoOptions = {
-        level: options.level || 'warn',
-        formatters: {
-            log(object) {
-                return sanitizePayload(object);
-            }
-        },
-        redact: {
-            paths: defaultPaths,
-            censor: '[REDACTED]'
-        }
-    };
-
-    if (options.transport && !destination) {
-        pinoOptions.transport = options.transport;
-    }
-
-    return destination ? pino(pinoOptions, destination) : pino(pinoOptions);
 }
 
 // Global process safety handlers to catch any Baileys internal async errors
@@ -152,46 +59,13 @@ const PORT = 5001;
 const authDir = path.join(__dirname, 'auth_info_baileys');
 const cachePath = path.join(__dirname, 'contacts_cache.json');
 const tokenPath = path.join(__dirname, '.watsup_ipc_token');
-const TOKEN_PATTERN = /^[a-fA-F0-9]{64}$/;
-
-let ipcToken = null;
-
+const TOKEN_PATTERN = ipcSecurity.TOKEN_PATTERN;
 /**
  * Loads a valid IPC token or replaces an invalid/missing token atomically.
  * Passing a custom path keeps tests isolated from the real project token.
  */
 function loadOrCreateToken(customTokenPath = tokenPath) {
-    if (customTokenPath === tokenPath && ipcToken) {
-        return ipcToken;
-    }
-
-    let temporaryPath = null;
-    try {
-        if (fs.existsSync(customTokenPath)) {
-            const existingToken = fs.readFileSync(customTokenPath, 'utf8').trim();
-            if (TOKEN_PATTERN.test(existingToken)) {
-                fs.chmodSync(customTokenPath, 0o600);
-                if (customTokenPath === tokenPath) ipcToken = existingToken;
-                return existingToken;
-            }
-        }
-
-        const newToken = crypto.randomBytes(32).toString('hex');
-        temporaryPath = `${customTokenPath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-        fs.writeFileSync(temporaryPath, newToken, { encoding: 'utf8', mode: 0o600 });
-        fs.chmodSync(temporaryPath, 0o600);
-        fs.renameSync(temporaryPath, customTokenPath);
-        temporaryPath = null;
-        fs.chmodSync(customTokenPath, 0o600);
-
-        if (customTokenPath === tokenPath) ipcToken = newToken;
-        return newToken;
-    } catch (err) {
-        if (temporaryPath && fs.existsSync(temporaryPath)) {
-            try { fs.unlinkSync(temporaryPath); } catch (cleanupErr) {}
-        }
-        throw new Error(`Critical: Secure IPC token could not be initialized: ${err.message}`);
-    }
+    return ipcSecurity.loadOrCreateToken(customTokenPath);
 }
 
 // Progress monitoring transform stream
@@ -304,48 +178,6 @@ function deleteAuthFolder() {
     }
 }
 
-/**
- * Validates and formats international digits into a WhatsApp standard JID
- */
-function formatJid(recipient) {
-    if (typeof recipient !== 'string') return null;
-    recipient = recipient.trim();
-    if (recipient.includes('@')) {
-        const isUserJid = /^\d{5,20}@s\.whatsapp\.net$/.test(recipient);
-        const isGroupJid = /^\d+(?:-\d+)?@g\.us$/.test(recipient);
-        const isLidJid = /^\d+@lid$/.test(recipient);
-        return isUserJid || isGroupJid || isLidJid ? recipient : null;
-    }
-
-    if (!/^\+?[\d\s()\-]+$/.test(recipient)) return null;
-    const digits = recipient.replace(/\D/g, '');
-    if (digits.length < 6 || digits.length > 20) return null;
-    return `${digits}@s.whatsapp.net`;
-}
-
-function secureAtomicWriteFile(filePath, content, options = {}) {
-    const dir = path.dirname(filePath);
-    const tempFile = path.join(dir, '.watsup_temp_' + crypto.randomBytes(8).toString('hex') + '.tmp');
-    try {
-        fs.writeFileSync(tempFile, content, { ...options, mode: 0o600 });
-        fs.chmodSync(tempFile, 0o600);
-        fs.renameSync(tempFile, filePath);
-        fs.chmodSync(filePath, 0o600);
-    } catch (err) {
-        try {
-            if (fs.existsSync(tempFile)) {
-                fs.unlinkSync(tempFile);
-            }
-        } catch (e) {}
-        throw err;
-    }
-}
-
-function secureAtomicWriteJson(filePath, data) {
-    const content = JSON.stringify(data, null, 2);
-    secureAtomicWriteFile(filePath, content, { encoding: 'utf8' });
-}
-
 async function writeQrSecurely(qr, filePath) {
     const buffer = await new Promise((resolve, reject) => {
         const QRCode = require('qrcode');
@@ -358,32 +190,15 @@ async function writeQrSecurely(qr, filePath) {
 }
 
 function enforceSecurePermissions(directory = authDir) {
-    if (fs.existsSync(directory)) {
-        fs.chmodSync(directory, 0o700);
-        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-            const entryPath = path.join(directory, entry.name);
-            if (entry.isDirectory()) {
-                enforceSecurePermissions(entryPath);
-            } else if (entry.isFile()) {
-                fs.chmodSync(entryPath, 0o600);
-            }
-        }
-    }
-    if (directory === authDir) {
-        const extraFiles = [
-            tokenPath,
-            cachePath,
-            path.join(__dirname, 'qr.png'),
-            path.join(__dirname, 'engine.log'),
-            path.join(__dirname, 'ui_error.log'),
-            path.join(__dirname, '.watsup_engine.pid')
-        ];
-        for (const file of extraFiles) {
-            if (fs.existsSync(file)) {
-                fs.chmodSync(file, 0o600);
-            }
-        }
-    }
+    const extraFiles = directory === authDir ? [
+        tokenPath,
+        cachePath,
+        path.join(__dirname, 'qr.png'),
+        path.join(__dirname, 'engine.log'),
+        path.join(__dirname, 'ui_error.log'),
+        path.join(__dirname, '.watsup_engine.pid')
+    ] : [];
+    secureFs.enforceSecurePermissions(directory, { extraFiles });
 }
 
 /**
@@ -675,19 +490,7 @@ function createApp(config = {}) {
 
     app.use(express.json({ limit: '10kb' }));
 
-    app.use('/api', (req, res, next) => {
-        const clientToken = req.headers['x-watsup-token'];
-        if (typeof clientToken !== 'string') {
-            return res.status(401).json({ success: false, error: 'Unauthorized: Missing IPC token.' });
-        }
-
-        const clientBuffer = Buffer.from(clientToken, 'utf8');
-        const expectedBuffer = Buffer.from(activeToken, 'utf8');
-        if (clientBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(clientBuffer, expectedBuffer)) {
-            return res.status(401).json({ success: false, error: 'Unauthorized: Invalid IPC token.' });
-        }
-        next();
-    });
+    app.use('/api', ipcSecurity.createIpcAuthMiddleware(activeToken));
 
     app.get('/api/status', (req, res) => {
         res.json({
