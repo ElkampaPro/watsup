@@ -29,36 +29,121 @@ function formatErrorBriefly(err) {
     return brief;
 }
 
-function rotateEngineLog() {
-    const logPath = path.join(__dirname, 'engine.log');
-    const backupPath = path.join(__dirname, 'engine.log.1');
-    const MAX_SIZE = 5 * 1024 * 1024; // 5MB
-    try {
-        if (fs.existsSync(logPath)) {
-            const stats = fs.statSync(logPath);
-            if (stats.size > MAX_SIZE) {
-                fs.copyFileSync(logPath, backupPath);
-                fs.truncateSync(logPath, 0);
-                fs.chmodSync(logPath, 0o600);
-                fs.chmodSync(backupPath, 0o600);
+function sanitizePayload(val, depth = 0) {
+    if (depth > 4) return '[REDACTED_MAX_DEPTH]';
+    if (val === null || val === undefined) return val;
+
+    // Check if it is a real Buffer
+    if (typeof val === 'object' && (Buffer.isBuffer(val) || val.constructor?.name === 'Buffer' || val._isBuffer)) {
+        return '[REDACTED_BUFFER]';
+    }
+
+    if (Array.isArray(val)) {
+        return val.map(item => sanitizePayload(item, depth + 1));
+    }
+
+    if (val instanceof Error) {
+        const sanitizedErr = {
+            name: val.name,
+            message: sanitizePayload(val.message, depth + 1),
+            statusCode: val.statusCode || (val.output && val.output.statusCode)
+        };
+        if (val.code) sanitizedErr.code = val.code;
+        return sanitizedErr;
+    }
+
+    if (typeof val === 'object') {
+        // Check if it represents serialized Buffer
+        if (val.type === 'Buffer' && Array.isArray(val.data)) {
+            return '[REDACTED_BUFFER]';
+        }
+        const sanitized = {};
+        for (const k of Object.keys(val)) {
+            const kl = k.toLowerCase();
+            if (kl === 'token' || kl === 'ipctoken' || kl === 'qr' || kl === 'key' || kl === 'session' || kl === 'raw' || kl === 'content') {
+                sanitized[k] = `[REDACTED_${k.toUpperCase()}]`;
+            } else {
+                sanitized[k] = sanitizePayload(val[k], depth + 1);
             }
         }
-    } catch (err) {
-        console.warn('[Engine] Warning: Log rotation failed:', err.message);
+        return sanitized;
     }
+
+    if (typeof val === 'string') {
+        let msg = val;
+        // Redact large hex strings (>128 chars)
+        msg = msg.replace(/[a-fA-F0-9]{128,}/g, '[REDACTED_HEX_LARGE]');
+        // Redact 64-char hex tokens
+        msg = msg.replace(/[a-fA-F0-9]{64}/g, '[REDACTED_HEX_64]');
+        // Redact keywords
+        msg = msg.replace(/(?:session|token|qr|key)/gi, (m) => `[REDACTED_${m.toUpperCase()}]`);
+        // Redact node.content
+        msg = msg.replace(/node\.content/gi, '[REDACTED_NODE_CONTENT]');
+        // Redact buffer string patterns
+        msg = msg.replace(/Buffer\s*<[a-fA-F0-9\s]*>/gi, '[REDACTED_BUFFER]');
+        // Redact WhatsApp JIDs (full JID)
+        msg = msg.replace(/\b\d{5,20}@(s\.whatsapp\.net|g\.us|c\.us)\b/g, '[REDACTED_JID]');
+        return msg;
+    }
+
+    return val;
+}
+
+function handleBackgroundError(reason, logger = console) {
+    const brief = formatErrorBriefly(reason);
+    const sanitizedReason = sanitizePayload(reason);
+    if (brief.includes('init queries Timed Out') || brief.includes('Timed Out')) {
+        logger.warn(`[Engine] Connection Warning (init queries Timed Out): ${brief}`);
+    } else {
+        logger.error(`[Engine] Unhandled Rejection: ${brief}`);
+        if (reason && typeof reason === 'object') {
+            logger.error('[Engine] Sanitized Error Payload:', JSON.stringify(sanitizedReason));
+        }
+    }
+}
+
+function createSanitizedLogger(destination, options = {}) {
+    const defaultPaths = [
+        '*.content',
+        '*.raw',
+        '*.key',
+        '*.message.conversation',
+        '*.message.extendedTextMessage',
+        'token',
+        'ipcToken',
+        'qr'
+    ];
+
+    const pinoOptions = {
+        level: options.level || 'warn',
+        formatters: {
+            log(object) {
+                return sanitizePayload(object);
+            }
+        },
+        redact: {
+            paths: defaultPaths,
+            censor: '[REDACTED]'
+        }
+    };
+
+    if (options.transport && !destination) {
+        pinoOptions.transport = options.transport;
+    }
+
+    return destination ? pino(pinoOptions, destination) : pino(pinoOptions);
 }
 
 // Global process safety handlers to catch any Baileys internal async errors
 process.on('unhandledRejection', (reason, promise) => {
-    const brief = formatErrorBriefly(reason);
-    if (brief.includes('init queries Timed Out') || brief.includes('Timed Out')) {
-        console.warn(`[Engine] Connection Warning (init queries Timed Out): ${brief}`);
-    } else {
-        console.error(`[Engine] Unhandled Rejection: ${brief}`);
-    }
+    handleBackgroundError(reason);
 });
 process.on('uncaughtException', (err) => {
     console.error('[Engine] Uncaught Exception:', formatErrorBriefly(err));
+    if (err && typeof err === 'object') {
+        const sanitizedErr = sanitizePayload(err);
+        console.error('[Engine] Sanitized Exception Payload:', JSON.stringify(sanitizedErr));
+    }
 });
 
 const PORT = 5001;
@@ -316,21 +401,8 @@ async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
     // High efficiency, silent logging configuration with redaction
-    const silentLogger = pino({
+    const silentLogger = createSanitizedLogger(null, {
         level: 'warn',
-        redact: {
-            paths: [
-                '*.content',
-                '*.raw',
-                '*.key',
-                '*.message.conversation',
-                '*.message.extendedTextMessage',
-                'token',
-                'ipcToken',
-                'qr'
-            ],
-            censor: '[REDACTED]'
-        },
         transport: {
             target: 'pino-pretty',
             options: { colorize: true }
@@ -721,7 +793,7 @@ function createApp(config = {}) {
             uploadProgress.percentage = 100;
             uploadProgress.phase = 'completed';
 
-            console.log(`[Pipeline] Successfully sent ${fileName} (${sizeMb.toFixed(2)} MB) to ${jid.split('@')[0]} in ${(durationMs / 1000).toFixed(2)}s (${speedMbps.toFixed(2)} Mbps)`);
+            console.log(`[Pipeline] Successfully sent ${fileName} (${sizeMb.toFixed(2)} MB) in ${(durationMs / 1000).toFixed(2)}s (${speedMbps.toFixed(2)} Mbps)`);
 
             res.json({ success: true, message: 'File streamed and sent successfully!' });
         } catch (err) {
@@ -730,7 +802,7 @@ function createApp(config = {}) {
             }
             console.error('[Pipeline] High-performance transfer failed:', formatErrorBriefly(err));
             uploadProgress.phase = 'failed';
-            uploadProgress.error = err.message || 'Transmission failed';
+            uploadProgress.error = formatErrorBriefly(err);
             res.status(500).json({ success: false, error: 'Transmission failed: Internal server error' });
         } finally {
             if (lockAcquired) {
@@ -752,7 +824,6 @@ function createApp(config = {}) {
 }
 
 function startEngine() {
-    rotateEngineLog();
     if (process.platform !== 'win32') {
         process.umask(0o077);
     }
@@ -802,8 +873,10 @@ module.exports = {
     writeQrSecurely,
     enforceSecurePermissions,
     fetchGroupsList,
-    rotateEngineLog,
+    sanitizePayload,
+    handleBackgroundError,
     formatErrorBriefly,
+    createSanitizedLogger,
     getSocketGeneration: () => currentSocketGeneration,
     setSocketGeneration: (val) => { currentSocketGeneration = val; },
     getLastSyncedGeneration: () => lastSyncedGeneration,

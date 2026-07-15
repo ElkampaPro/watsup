@@ -49,6 +49,7 @@ class WatsUpUI:
         self.selected_files = []
         self.connection_status = "offline"
         self.polling_active = True
+        self.shutdown_started = False
         self.qr_popup = None
         self.qr_photo = None
         self.upload_active = False
@@ -410,6 +411,24 @@ class WatsUpUI:
     # BACKGROUND LOOPS & API PROTOCOLS
     # ==========================================
 
+    def safe_after(self, ms, callback, *args):
+        if not self.polling_active or getattr(self, 'shutdown_started', False):
+            return None
+        try:
+            return self.root.after(ms, callback, *args)
+        except Exception:
+            return None
+
+    def shutdown(self):
+        if getattr(self, 'shutdown_started', False):
+            return
+        self.shutdown_started = True
+        self.polling_active = False
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
     def start_background_polling(self):
         # Poll connection state in a lightweight daemon thread
         threading.Thread(target=self.poll_state_loop, daemon=True).start()
@@ -445,12 +464,12 @@ class WatsUpUI:
                 user_id = user_info.get("id", "Session").split(":")[0]
                 user_name = user_info.get("name", "Device")
 
-                self.root.after(0, self.update_status_ui, "CONNECTED", f"Linked Device: +{user_id} ({user_name})", "Online.TLabel")
-                self.root.after(0, self.close_qr_popup)
+                self.safe_after(0, self.update_status_ui, "CONNECTED", f"Linked Device: +{user_id} ({user_name})", "Online.TLabel")
+                self.safe_after(0, self.close_qr_popup)
 
                 # Pre-populate self-chat contact immediately upon connection transition
                 if user_id and user_id != "Session" and not self.contacts_data:
-                    self.root.after(0, self.setup_default_self_contact, user_id)
+                    self.safe_after(0, self.setup_default_self_contact, user_id)
 
                 # Check dynamic upload progress
                 upload_progress = status_res.get("uploadProgress", {})
@@ -465,13 +484,13 @@ class WatsUpUI:
                     self.upload_active = True
                     if phase == "awaiting_confirmation":
                         status_text = "Upload finished — waiting for WhatsApp confirmation"
-                        self.root.after(0, self.update_progress_ui, 99, status_text, f"99% ({bytes_sent}/{total_bytes})")
+                        self.safe_after(0, self.update_progress_ui, 99, status_text, f"99% ({bytes_sent}/{total_bytes})")
                     else:
-                        self.root.after(0, self.update_progress_ui, percentage, f"Streaming: {file_name}", f"{percentage}% ({bytes_sent}/{total_bytes})")
+                        self.safe_after(0, self.update_progress_ui, percentage, f"Streaming: {file_name}", f"{percentage}% ({bytes_sent}/{total_bytes})")
                 else:
                     if not self.sending_queue:
                         self.upload_active = False
-                        self.root.after(0, self.update_progress_ui, 0, "Upload Progress: Idle", "0%")
+                        self.safe_after(0, self.update_progress_ui, 0, "Upload Progress: Idle", "0%")
                 # Use engine's groupsSynced flag to know exactly when to stop polling contacts
                 groups_synced = status_res.get("groupsSynced", False)
                 self.groups_synced = groups_synced
@@ -483,20 +502,20 @@ class WatsUpUI:
                     if not self.fetching_contacts:
                         threading.Thread(target=self.fetch_contacts_list, daemon=True).start()
             elif status == "connecting":
-                self.root.after(0, self.update_status_ui, "CONNECTING", "Establishing raw socket interfaces...", "Offline.TLabel")
-                self.root.after(0, self.close_qr_popup)
+                self.safe_after(0, self.update_status_ui, "CONNECTING", "Establishing raw socket interfaces...", "Offline.TLabel")
+                self.safe_after(0, self.close_qr_popup)
                 self.contacts_fetched = False
                 self.groups_synced = False
                 self.last_status = "connecting"
             else:
-                self.root.after(0, self.update_status_ui, "PAIRING REQUIRED", "Engine connected. Scan the QR code in the popup.", "Offline.TLabel")
+                self.safe_after(0, self.update_status_ui, "PAIRING REQUIRED", "Engine connected. Scan the QR code in the popup.", "Offline.TLabel")
                 self.contacts_fetched = False
                 self.groups_synced = False
                 self.last_status = "disconnected"
                 if status_res.get("qrAvailable", False):
-                    self.root.after(0, self.show_qr_popup)
+                    self.safe_after(0, self.show_qr_popup)
                 else:
-                    self.root.after(0, self.close_qr_popup)
+                    self.safe_after(0, self.close_qr_popup)
         else:
             # Engine server is offline entirely
             self.connection_status = "offline"
@@ -504,11 +523,11 @@ class WatsUpUI:
             self.contacts_fetched = False
             self.groups_synced = False
             self.last_status = "offline"
-            self.root.after(0, self.update_status_ui, "ENGINE OFFLINE", "Run 'node engine.js' in your terminal SSH window.", "Offline.TLabel")
-            self.root.after(0, self.clear_contacts_dropdown)
-            self.root.after(0, self.close_qr_popup)
+            self.safe_after(0, self.update_status_ui, "ENGINE OFFLINE", "Run 'node engine.js' in your terminal SSH window.", "Offline.TLabel")
+            self.safe_after(0, self.clear_contacts_dropdown)
+            self.safe_after(0, self.close_qr_popup)
 
-        self.root.after(0, self.validate_inputs)
+        self.safe_after(0, self.validate_inputs)
 
     def update_status_ui(self, status_text, detail_text, style_class):
         self.status_val_label.config(text=status_text, style=style_class)
@@ -602,7 +621,7 @@ class WatsUpUI:
                 # Check if the values actually changed to prevent dropdown reset spam
                 if set(self.contacts_data.keys()) != set(temp_map.keys()):
                     self.contacts_data = temp_map
-                    self.root.after(0, self.set_contacts_dropdown, dropdown_values)
+                    self.safe_after(0, self.set_contacts_dropdown, dropdown_values)
 
                 # If the engine has completed group sync, we mark contacts as fully fetched
                 # to stop future polling of this endpoint.
@@ -752,7 +771,7 @@ class WatsUpUI:
         is_rar = bool(rar_bin)
 
         self.log_message(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({self.format_bytes(file_size)}) into {num_parts} equally-sized parts (~{self.format_bytes(part_size_bytes)} each). Please wait, zero-CPU / zero-RAM active...")
-        self.root.after(0, self.show_splitting_banner, file_name, file_size, is_rar)
+        self.safe_after(0, self.show_splitting_banner, file_name, file_size, is_rar)
 
         # Create unique temp folder inside workspace using tempfile.mkdtemp
         project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -780,7 +799,7 @@ class WatsUpUI:
                         part_paths.append(os.path.join(temp_dir, f))
 
                 if part_paths:
-                    self.root.after(0, self.hide_splitting_banner)
+                    self.safe_after(0, self.hide_splitting_banner)
                     self.create_manifest_file(filePath, part_paths, is_rar=True)
                     manifest_path = os.path.join(temp_dir, "manifest.txt")
                     if os.path.exists(manifest_path):
@@ -826,14 +845,14 @@ class WatsUpUI:
                     part_num += 1
 
             self.log_message("ℹ️ [Notice] Created raw binary parts (not RAR archives). These files must be combined sequentially to restore the original file.")
-            self.root.after(0, self.hide_splitting_banner)
+            self.safe_after(0, self.hide_splitting_banner)
             self.create_manifest_file(filePath, part_paths, is_rar=False)
             manifest_path = os.path.join(temp_dir, "manifest.txt")
             if os.path.exists(manifest_path):
                 part_paths.append(manifest_path)
             return part_paths, True
         except Exception as e:
-            self.root.after(0, self.hide_splitting_banner)
+            self.safe_after(0, self.hide_splitting_banner)
             self.log_message(f"Error splitting file '{file_name}': {str(e)}")
             # Cleanup any partially written files
             for p in part_paths:
@@ -859,7 +878,7 @@ class WatsUpUI:
                     target_jid = digits + "@s.whatsapp.net"
 
             if not target_jid:
-                self.root.after(0, self.post_transmission_ui, False, "Invalid recipient selected.")
+                self.safe_after(0, self.post_transmission_ui, False, "Invalid recipient selected.")
                 return
 
             # Backup the list of files to process sequentially
@@ -975,17 +994,17 @@ class WatsUpUI:
             for sp in succeeded_paths:
                 if sp in self.selected_files:
                     self.selected_files.remove(sp)
-            self.root.after(0, self.refresh_queue_table)
+            self.safe_after(0, self.refresh_queue_table)
 
             if success_count == total_files:
-                self.root.after(0, self.post_transmission_ui, True, f"All {total_files} files streamed and sent successfully!")
+                self.safe_after(0, self.post_transmission_ui, True, f"All {total_files} files streamed and sent successfully!")
             elif success_count > 0:
-                self.root.after(0, self.post_transmission_ui, False, f"Queue completed with warnings: Sent {success_count} of {total_files} files successfully.")
+                self.safe_after(0, self.post_transmission_ui, False, f"Queue completed with warnings: Sent {success_count} of {total_files} files successfully.")
             else:
-                self.root.after(0, self.post_transmission_ui, False, "All file transmissions in the queue failed.")
+                self.safe_after(0, self.post_transmission_ui, False, "All file transmissions in the queue failed.")
         except Exception as e:
             self.log_message(f"Critical error in transmission worker thread: {str(e)}")
-            self.root.after(0, self.post_transmission_ui, False, f"Worker exception: {str(e)}")
+            self.safe_after(0, self.post_transmission_ui, False, f"Worker exception: {str(e)}")
 
     def post_transmission_ui(self, success, message):
         self.send_btn.config(text="Send via local disk stream")
@@ -1074,7 +1093,7 @@ class WatsUpUI:
             self.logger_box.insert("end", f"{timestamp}{message}\n")
             self.logger_box.see("end")
             self.logger_box.config(state="disabled")
-        self.root.after(0, update_log)
+        self.safe_after(0, update_log)
 
     def format_bytes(self, bytes_val):
         if bytes_val == 0:
@@ -1093,8 +1112,7 @@ if __name__ == "__main__":
 
     # Elegant custom window closed hook
     def on_closing():
-        app.polling_active = False
-        root.destroy()
+        app.shutdown()
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()

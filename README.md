@@ -18,8 +18,8 @@ WatsUp Desktop Streamer consists of two independent local processes communicatin
                                                          [ WhatsApp Server ]
 ```
 
-1.  **The Background Engine (`engine.js`)**: A silent Node.js daemon using the `@whiskeysockets/baileys` library. It connects directly to WhatsApp servers via raw WebSockets. It operates at **< 80MB RAM** at idle and exposes a local-only REST API on loopback `127.0.0.1:5001`.
-2.  **The Desktop GUI (`ui.py`)**: A native Python desktop interface using standard `tkinter` and `ttk` libraries. It consumes **< 15MB RAM**, requires **zero pip dependencies**, and provides a responsive, dark-themed dashboard to select files, manage the queue, and select contacts.
+1.  **The Background Engine (`engine.js`)**: A silent Node.js daemon using the `@whiskeysockets/baileys` library. It connects directly to WhatsApp servers via raw WebSockets. It operates at **~168MB RAM** and **~6% CPU** during active heavy file transmission (note: these are not idle measurements, and actual usage varies by hardware and network speed). It exposes a local-only REST API on loopback `127.0.0.1:5001`.
+2.  **The Desktop GUI (`ui.py`)**: A native Python desktop interface using standard `tkinter` and `ttk` libraries. It consumes **~49MB RAM** (not idle, varies by OS), has **no mandatory pip dependencies**, and provides a responsive, dark-themed dashboard to select files, manage the queue, and select contacts.
 
 ### 🔒 IPC Security & Token Protection
 The background engine generates a secure 32-byte dynamic token at startup inside `.watsup_ipc_token` (with strict `0o600` owner-only permissions). All REST API requests under `/api/*` are strictly authenticated via the `X-WatsUp-Token` header using a `crypto.timingSafeEqual` comparison.
@@ -53,7 +53,7 @@ This command will:
 - Install any missing system dependencies automatically (requires root or passwordless sudo).
 - Set up secure permissions (`0700` for directories, `0600` for files).
 - Create a desktop launcher shortcut at `~/Desktop/watsup.desktop` and register it in the desktop menus.
-- Build production Node.js modules using `npm ci` only if they are missing or corrupt.
+- Build production Node.js modules using `npm ci` only if `node_modules` or `node_modules/express` is missing.
 - Start the WhatsApp socket daemon and the GUI.
 
 ### 2. Updating an Existing Install (Session Preservation)
@@ -97,7 +97,7 @@ python3 ui.py
 
 ## 🧪 Running Unit Tests
 
-The project includes offline-capable unit tests for both Node.js and Python environments:
+The project includes offline-capable unit tests for both Node.js, Python, and Shell script launcher environments:
 
 ```bash
 # Run Node.js engine unit tests only
@@ -106,8 +106,14 @@ npm run test:node
 # Run Python UI unit tests only (with bytecode disabled)
 npm run test:python
 
-# Run all project tests sequentially
+# Run mock installer/launcher shell script unit tests only
+npm run test:shell
+
+# Run Node and Python tests sequentially
 npm run test:all
+
+# Run all project tests (Node, Python, and Shell) sequentially
+npm run test:all:linux
 ```
 
 ---

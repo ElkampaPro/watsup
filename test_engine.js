@@ -15,8 +15,10 @@ const {
     writeQrSecurely,
     enforceSecurePermissions,
     fetchGroupsList,
-    rotateEngineLog,
+    createSanitizedLogger,
     formatErrorBriefly,
+    sanitizePayload,
+    handleBackgroundError,
     getSocketGeneration,
     setSocketGeneration,
     getLastSyncedGeneration,
@@ -70,7 +72,7 @@ async function closeServer(server) {
 
 async function waitUntil(predicate, timeoutMs = 1000) {
     const deadline = Date.now() + timeoutMs;
-    while (!predicate()) {
+    while (!(await predicate())) {
         if (Date.now() >= deadline) throw new Error('Timed out waiting for test condition.');
         await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -441,29 +443,6 @@ test('formatErrorBriefly redacts keys, sessions, tokens, and raw buffers', () =>
     assert.equal(brief2, '[BaileysError] Failed to write [REDACTED_SESSION] state (Status: 403) (Code: WRITE_FAIL)');
 });
 
-test('rotateEngineLog copy-and-truncates engine.log if size exceeds 5MB limit', () => {
-    const logPath = path.join(__dirname, 'engine.log');
-    const backupPath = path.join(__dirname, 'engine.log.1');
-
-    // Cleanup first
-    try { fs.unlinkSync(logPath); } catch (_) {}
-    try { fs.unlinkSync(backupPath); } catch (_) {}
-
-    // Create a mock large file
-    const largeContent = 'A'.repeat(6 * 1024 * 1024); // 6MB
-    fs.writeFileSync(logPath, largeContent, { encoding: 'utf8', mode: 0o600 });
-
-    rotateEngineLog();
-
-    assert.ok(fs.existsSync(logPath));
-    assert.equal(fs.statSync(logPath).size, 0, 'Original engine.log should be truncated to 0.');
-    assert.ok(fs.existsSync(backupPath));
-    assert.equal(fs.statSync(backupPath).size, 6 * 1024 * 1024, 'Backup file should contain the original large log content.');
-
-    // Cleanup
-    try { fs.unlinkSync(logPath); } catch (_) {}
-    try { fs.unlinkSync(backupPath); } catch (_) {}
-});
 
 test('fetchGroupsList deduplicates concurrent group sync requests', async () => {
     // Reset internal state
@@ -524,7 +503,7 @@ test('fetchGroupsList allows new sync on reconnect socket generation change and 
 
     // Now simulate reconnect (socket generation changes to 21)
     setSocketGeneration(21);
-    
+
     let fetchCount2 = 0;
     const mockSock2 = {
         groupFetchAllParticipating: async () => {
@@ -554,15 +533,83 @@ test('POST /api/send transition progress phases correctly', async () => {
 
     const token = 'c'.repeat(64);
     const deferred = createDeferred();
-    
+    let capturedStream = null;
+
     const app = createApp({
         ipcToken: token,
         connectionState: { status: 'connected' },
         getSock: () => ({
             sendMessage: async (jid, content) => {
-                // Read the stream to trigger ProgressStream progress callbacks
-                content.document.stream.resume();
+                capturedStream = content.document.stream;
                 return deferred.promise;
+            }
+        })
+    });
+
+    const listener = await listen(app);
+    try {
+        let hasResolved = false;
+        const sendPromise = makeRequest(listener.port, '/api/send', 'POST', token, {
+            filePath: dummyPath,
+            recipient: '213661834572'
+        });
+        sendPromise.then(() => { hasResolved = true; });
+
+        // 1. Wait for streaming phase (active=true)
+        await waitUntil(async () => {
+            const status = await makeRequest(listener.port, '/api/status', 'GET', token);
+            return status.body.uploadProgress.active === true && status.body.uploadProgress.phase === 'streaming';
+        });
+
+        // Ensure capturedStream is now available and resume it
+        assert.ok(capturedStream, 'Stream should have been captured');
+        capturedStream.resume();
+
+        // 2. Wait for awaiting_confirmation (active=true, percentage=99)
+        await waitUntil(async () => {
+            const status = await makeRequest(listener.port, '/api/status', 'GET', token);
+            return status.body.uploadProgress.phase === 'awaiting_confirmation';
+        }, 3000);
+
+        const checkStatus = (await makeRequest(listener.port, '/api/status', 'GET', token)).body.uploadProgress;
+        assert.equal(checkStatus.active, true);
+        assert.equal(checkStatus.percentage, 99);
+        assert.equal(hasResolved, false, 'HTTP request must remain pending before sendMessage resolves');
+
+        // 3. Resolve sendMessage call
+        deferred.resolve({ key: { id: 'msg123' } });
+
+        const result = await sendPromise;
+        assert.equal(result.statusCode, 200);
+
+        // Ensure status reflects completed (active=false, percentage=100)
+        const finalStatus = (await makeRequest(listener.port, '/api/status', 'GET', token)).body.uploadProgress;
+        assert.equal(finalStatus.active, false);
+        assert.equal(finalStatus.percentage, 100);
+        assert.equal(finalStatus.phase, 'completed');
+        assert.equal(finalStatus.bytesSent, finalStatus.totalBytes);
+    } finally {
+        deferred.resolve();
+        await closeServer(listener.server);
+        fs.rmSync(tempDirectory, { recursive: true, force: true });
+    }
+});
+
+test('POST /api/send handles sendMessage failure and releases lock', async () => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-send-fail-'));
+    const dummyPath = path.join(tempDirectory, 'payload.txt');
+    fs.writeFileSync(dummyPath, 'a'.repeat(1 * 1024 * 1024), 'utf8'); // 1MB
+
+    const token = 'c'.repeat(64);
+    const deferred = createDeferred();
+
+    const app = createApp({
+        ipcToken: token,
+        connectionState: { status: 'connected' },
+        getSock: () => ({
+            sendMessage: async (jid, content) => {
+                content.document.stream.resume();
+                throw new Error('Socket closed abruptly');
             }
         })
     });
@@ -574,30 +621,192 @@ test('POST /api/send transition progress phases correctly', async () => {
             recipient: '213661834572'
         });
 
-        // Let's wait a brief moment for streaming phase to initialize and progress
-        await waitUntil(async () => {
-            const status = await makeRequest(listener.port, '/api/status', 'GET', token);
-            return status.body.uploadProgress.active === true && status.body.uploadProgress.phase === 'streaming';
+        const result = await sendPromise;
+        assert.equal(result.statusCode, 500);
+
+        const status = (await makeRequest(listener.port, '/api/status', 'GET', token)).body.uploadProgress;
+        assert.equal(status.active, false);
+        assert.equal(status.phase, 'failed');
+        assert.match(status.error, /Socket closed abruptly/);
+
+        // Verify the lock is released and subsequent request succeeds or gets accepted
+        const app2 = createApp({
+            ipcToken: token,
+            connectionState: { status: 'connected' },
+            getSock: () => ({
+                sendMessage: async (jid, content) => {
+                    content.document.stream.resume();
+                    return { key: { id: 'msg456' } };
+                }
+            })
+        });
+        const listener2 = await listen(app2);
+        try {
+            const sendPromiseNext = await makeRequest(listener2.port, '/api/send', 'POST', token, {
+                filePath: dummyPath,
+                recipient: '213661834572'
+            });
+            assert.equal(sendPromiseNext.statusCode, 200);
+        } finally {
+            await closeServer(listener2.server);
+        }
+    } finally {
+        await closeServer(listener.server);
+        fs.rmSync(tempDirectory, { recursive: true, force: true });
+    }
+});
+
+test('handleBackgroundError side/lateral error during active send does not impact progress or locks', async () => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-bg-err-'));
+    const dummyPath = path.join(tempDirectory, 'payload.txt');
+    fs.writeFileSync(dummyPath, 'a'.repeat(2 * 1024 * 1024), 'utf8'); // 2MB
+
+    const token = 'd'.repeat(64);
+    const deferred = createDeferred();
+
+    const app = createApp({
+        ipcToken: token,
+        connectionState: { status: 'connected' },
+        getSock: () => ({
+            sendMessage: async (jid, content) => {
+                content.document.stream.resume();
+                return deferred.promise;
+            }
+        })
+    });
+
+    const listener = await listen(app);
+    try {
+        // 1. Start upload A
+        const sendPromiseA = makeRequest(listener.port, '/api/send', 'POST', token, {
+            filePath: dummyPath,
+            recipient: '213661834572'
         });
 
-        // Let the stream finish reading entirely so it transitions to awaiting_confirmation
+        // Wait for streaming phase
         await waitUntil(async () => {
             const status = await makeRequest(listener.port, '/api/status', 'GET', token);
-            return status.body.uploadProgress.phase === 'awaiting_confirmation';
-        }, 3000);
+            const progress = status.body.uploadProgress;
+            return progress.active === true && (progress.phase === 'streaming' || progress.phase === 'awaiting_confirmation');
+        });
 
-        // Resolve sendMessage call to simulate WhatsApp successfully confirming the receive
+        const snapshot = (await makeRequest(listener.port, '/api/status', 'GET', token)).body.uploadProgress;
+
+        // 2. Intercept a lateral/background decryption error
+        const bgError = new Error('decryption failed for inbound encrypted message');
+        bgError.name = 'DecryptionError';
+        bgError.raw = Buffer.from('raw encrypted message payload');
+
+        const logs = [];
+        const mockLogger = {
+            error: (msg, payload) => { logs.push(msg + (payload ? ' ' + payload : '')); },
+            warn: (msg) => { logs.push(msg); }
+        };
+
+        handleBackgroundError(bgError, mockLogger);
+
+        // Assert log message does not contain raw buffer or sensitive unredacted token
+        const fullLogStr = logs.join('\n');
+        assert.match(fullLogStr, /Unhandled Rejection/);
+        assert.ok(!fullLogStr.includes('raw encrypted message payload'));
+
+        // 3. Assert active progress state is still streaming/awaiting_confirmation and unaffected
+        const statusCheck = (await makeRequest(listener.port, '/api/status', 'GET', token)).body.uploadProgress;
+        assert.equal(statusCheck.active, true);
+        assert.equal(statusCheck.totalBytes, snapshot.totalBytes);
+        assert.ok(statusCheck.bytesSent >= snapshot.bytesSent);
+        assert.ok(statusCheck.phase === 'streaming' || statusCheck.phase === 'awaiting_confirmation');
+
+        // 4. Assert concurrent request B still returns 409
+        const sendPromiseB = await makeRequest(listener.port, '/api/send', 'POST', token, {
+            filePath: dummyPath,
+            recipient: '213661834572'
+        });
+        assert.equal(sendPromiseB.statusCode, 409);
+
+        // Resolve A
         deferred.resolve({ key: { id: 'msg123' } });
+        const resultA = await sendPromiseA;
+        assert.equal(resultA.statusCode, 200);
 
-        const result = await sendPromise;
-        assert.equal(result.statusCode, 200);
+        // Verify completion fields
+        const postStatus = (await makeRequest(listener.port, '/api/status', 'GET', token)).body.uploadProgress;
+        assert.equal(postStatus.active, false);
+        assert.equal(postStatus.percentage, 100);
+        assert.equal(postStatus.phase, 'completed');
+        assert.equal(postStatus.bytesSent, postStatus.totalBytes);
 
-        // Ensure status reflects completed
-        const finalStatus = await makeRequest(listener.port, '/api/status', 'GET', token);
-        assert.equal(finalStatus.body.uploadProgress.active, false);
+        // 5. Assert next request succeeds after A completes
+        const sendPromiseC = await makeRequest(listener.port, '/api/send', 'POST', token, {
+            filePath: dummyPath,
+            recipient: '213661834572'
+        });
+        assert.equal(sendPromiseC.statusCode, 200);
+
     } finally {
         deferred.resolve();
         await closeServer(listener.server);
         fs.rmSync(tempDirectory, { recursive: true, force: true });
     }
+});
+
+test('createSanitizedLogger recursively redacts sensitive data and JIDs', async () => {
+    const logs = [];
+    const destination = new (require('stream').Writable)({
+        write(chunk, encoding, callback) {
+            logs.push(chunk.toString());
+            callback();
+        }
+    });
+
+    const testLogger = createSanitizedLogger(destination, { level: 'info' });
+    testLogger.info({
+        msg: 'unhandled error occurred',
+        raw: 'sensitive raw payload string',
+        token: 'sensitive token string',
+        node: { content: 'sensitive node content data' },
+        buffer: Buffer.from('some secret byte data'),
+        jid: '1234567890@s.whatsapp.net',
+        otherField: 'safe data value',
+        err: new Error('critical key lookup failed')
+    });
+
+    // Wait a brief moment for pino to write
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const loggedStr = logs.join('\n');
+
+    // Assert sensitive fields are redacted
+    assert.ok(!loggedStr.includes('sensitive raw payload string'), 'Should redact raw field');
+    assert.ok(!loggedStr.includes('sensitive token string'), 'Should redact token field');
+    assert.ok(!loggedStr.includes('sensitive node content data'), 'Should redact node.content');
+    assert.ok(!loggedStr.includes('some secret byte data'), 'Should redact buffer');
+    assert.ok(!loggedStr.includes('1234567890@s.whatsapp.net'), 'Should redact JID');
+
+    // Assert safe/generic fields are preserved
+    assert.ok(loggedStr.includes('unhandled error occurred'), 'Should preserve msg text');
+    assert.ok(loggedStr.includes('safe data value'), 'Should preserve safe fields');
+    assert.ok(loggedStr.includes('critical [REDACTED_KEY] lookup failed'), 'Should preserve error message');
+});
+
+test('waitUntil awaits async predicates and throws on timeout', async () => {
+    let callCount = 0;
+    const asyncPredicate = async () => {
+        callCount++;
+        return callCount >= 3;
+    };
+
+    await waitUntil(asyncPredicate, 500);
+    assert.ok(callCount >= 3, 'Should wait until predicate evaluates to true');
+
+    // Test timeout throwing
+    let timedOut = false;
+    try {
+        await waitUntil(async () => false, 100);
+    } catch (err) {
+        if (err.message.includes('Timed out')) {
+            timedOut = true;
+        }
+    }
+    assert.ok(timedOut, 'Should throw a timeout error if predicate never returns true');
 });

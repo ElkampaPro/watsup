@@ -13,3 +13,4 @@ __pycache__/
 .watsup_engine.pid
 engine_out.log
 engine_err.log
+.tkinterdnd2_attempted

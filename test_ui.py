@@ -217,5 +217,54 @@ class TestWatsUpUI(unittest.TestCase):
         finally:
             shutil.rmtree(temp_test_dir)
 
+    def test_shutdown_idempotency(self):
+        # Verify that shutdown can be called multiple times without exceptions
+        mock_root = MagicMock()
+        with patch.object(WatsUpUI, 'setup_styles'), \
+             patch.object(WatsUpUI, 'create_widgets'), \
+             patch.object(WatsUpUI, 'start_background_polling'), \
+             patch.object(WatsUpUI, 'log_message'):
+            ui = WatsUpUI(mock_root)
+
+        self.assertFalse(ui.shutdown_started)
+        ui.shutdown()
+        self.assertTrue(ui.shutdown_started)
+        self.assertFalse(ui.polling_active)
+        mock_root.destroy.assert_called_once()
+
+        # Call again: should not throw error or call destroy again
+        ui.shutdown()
+        self.assertTrue(ui.shutdown_started)
+        mock_root.destroy.assert_called_once()
+
+    def test_safe_after_scheduling(self):
+        # Verify safe_after respects polling_active and shutdown_started flags
+        mock_root = MagicMock()
+        with patch.object(WatsUpUI, 'setup_styles'), \
+             patch.object(WatsUpUI, 'create_widgets'), \
+             patch.object(WatsUpUI, 'start_background_polling'), \
+             patch.object(WatsUpUI, 'log_message'):
+            ui = WatsUpUI(mock_root)
+
+        # 1. Normal state
+        ui.polling_active = True
+        ui.shutdown_started = False
+        ui.safe_after(100, lambda: None)
+        mock_root.after.assert_called_once()
+
+        # 2. After shutdown starts
+        mock_root.after.reset_mock()
+        ui.shutdown_started = True
+        res = ui.safe_after(100, lambda: None)
+        self.assertIsNone(res)
+        mock_root.after.assert_not_called()
+
+        # 3. TclError safety handler
+        ui.shutdown_started = False
+        import _tkinter
+        mock_root.after.side_effect = _tkinter.TclError("invalid command")
+        res2 = ui.safe_after(100, lambda: None)
+        self.assertIsNone(res2)
+
 if __name__ == '__main__':
     unittest.main()
