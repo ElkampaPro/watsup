@@ -15,6 +15,7 @@ import json
 import os
 import threading
 import time
+import api_client
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -1037,14 +1038,7 @@ class WatsUpUI:
 
     def load_ipc_token(self):
         token_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".watsup_ipc_token")
-        if os.path.exists(token_path):
-            try:
-                with open(token_path, "r", encoding="utf-8") as f:
-                    self.ipc_token = f.read().strip()
-            except Exception:
-                self.ipc_token = None
-        else:
-            self.ipc_token = None
+        self.ipc_token = api_client.load_ipc_token(token_path)
 
     def make_api_request(self, path, data=None, timeout=8):
         """
@@ -1052,37 +1046,12 @@ class WatsUpUI:
         """
         if not hasattr(self, 'ipc_token') or not self.ipc_token:
             self.load_ipc_token()
-
-        url = f"http://127.0.0.1:5001{path}"
-        try:
-            req_data = json.dumps(data).encode('utf-8') if data else None
-            headers = {'Content-Type': 'application/json'} if data else {}
-            if hasattr(self, 'ipc_token') and self.ipc_token:
-                headers['X-WatsUp-Token'] = self.ipc_token
-
-            req = urllib.request.Request(
-                url,
-                data=req_data,
-                headers=headers
-            )
-            # Support dynamic timeouts (short for polling, long for streaming)
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                return json.loads(response.read().decode('utf-8'))
-        except urllib.error.HTTPError as e:
-            try:
-                err_body = e.read().decode('utf-8')
-                result = json.loads(err_body)
-                if isinstance(result, dict):
-                    result["status_code"] = e.code
-                return result
-            except Exception:
-                return {"success": False, "status_code": e.code, "error": f"HTTP Error {e.code}: {e.reason}"}
-            finally:
-                e.close()
-        except urllib.error.URLError as e:
-            return {"offline_flag": True, "error": str(e.reason if hasattr(e, 'reason') else e)}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return api_client.make_api_request(
+            path,
+            data=data,
+            timeout=timeout,
+            ipc_token=self.ipc_token
+        )
 
     # ==========================================
     # INTERFACE UTILS

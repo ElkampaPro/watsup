@@ -73,7 +73,9 @@ jobs:
           node --check benchmarks/local_pipeline.js
 
       - name: Check Python Syntax (AST)
-        run: python -c "import ast,pathlib; ast.parse(pathlib.Path('ui.py').read_text(encoding='utf-8'))"
+        run: |
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('ui.py').read_text(encoding='utf-8'))"
+          python -c "import ast,pathlib; ast.parse(pathlib.Path('api_client.py').read_text(encoding='utf-8'))"
 
       - name: Check Bash Scripts Syntax
         run: bash -n launch.sh launch_test.sh

@@ -13,6 +13,7 @@ import tkinter as tk
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ui import WatsUpUI
+import api_client
 
 class DummyTk:
     def __init__(self):
@@ -293,6 +294,150 @@ class TestWatsUpUI(unittest.TestCase):
             mock_photo_class.assert_called_once_with(file=icon_path)
             self.assertEqual(mock_root._watsup_icon, mock_photo_image)
             mock_root.iconphoto.assert_called_once_with(True, mock_photo_image)
+
+class TestApiClient(unittest.TestCase):
+    def test_import_safety(self):
+        # Verify that importing api_client has no side effects (no Tkinter, no threads, etc.)
+        import subprocess
+        code = "import sys, api_client; assert 'tkinter' not in sys.modules; print('ok')"
+        output = subprocess.check_output([sys.executable, "-c", code], text=True).strip()
+        self.assertEqual(output, "ok")
+
+    def test_token_loading(self):
+        # 1. Valid file
+        temp_dir = tempfile.mkdtemp()
+        try:
+            token_path = os.path.join(temp_dir, ".watsup_ipc_token")
+            with open(token_path, "w", encoding="utf-8") as f:
+                f.write("  my_secret_token_123  \n")
+            token = api_client.load_ipc_token(token_path)
+            self.assertEqual(token, "my_secret_token_123")
+
+            # 2. File not found
+            self.assertIsNone(api_client.load_ipc_token(os.path.join(temp_dir, "nonexistent")))
+
+            # 3. Read exception
+            with patch("builtins.open", side_effect=IOError("Failed to open")):
+                self.assertIsNone(api_client.load_ipc_token(token_path))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_http_success(self):
+        mock_opener = MagicMock()
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"success": true, "status": "ok"}'
+        mock_response.__enter__.return_value = mock_response
+        mock_opener.open.return_value = mock_response
+
+        res = api_client.make_api_request(
+            "/api/status",
+            data={"filePath": "abc.txt"},
+            ipc_token="xyz",
+            opener=mock_opener
+        )
+        self.assertEqual(res, {"success": True, "status": "ok"})
+        mock_opener.open.assert_called_once()
+        req = mock_opener.open.call_args[0][0]
+        self.assertEqual(req.full_url, "http://127.0.0.1:5001/api/status")
+        self.assertEqual(req.headers.get("Content-type"), "application/json")
+        self.assertEqual(req.headers.get("X-watsup-token"), "xyz")
+        self.assertEqual(req.data, b'{"filePath": "abc.txt"}')
+
+    def test_http_error_json(self):
+        mock_opener = MagicMock()
+        mock_fp = io.BytesIO(b'{"success": false, "error": "WhatsApp engine disconnected"}')
+        # HTTPError params: url, code, msg, hdrs, fp
+        mock_opener.open.side_effect = urllib.error.HTTPError(
+            "http://127.0.0.1:5001/api/status",
+            401,
+            "Unauthorized",
+            {},
+            mock_fp
+        )
+
+        res = api_client.make_api_request(
+            "/api/status",
+            opener=mock_opener
+        )
+        self.assertEqual(res, {
+            "success": False,
+            "error": "WhatsApp engine disconnected",
+            "status_code": 401
+        })
+        self.assertTrue(mock_fp.closed)
+
+    def test_http_error_invalid_body(self):
+        mock_opener = MagicMock()
+        mock_fp = io.BytesIO(b'Internal Server Error')
+        mock_opener.open.side_effect = urllib.error.HTTPError(
+            "http://127.0.0.1:5001/api/status",
+            500,
+            "Internal Server Error",
+            {},
+            mock_fp
+        )
+
+        res = api_client.make_api_request(
+            "/api/status",
+            opener=mock_opener
+        )
+        self.assertEqual(res, {
+            "success": False,
+            "status_code": 500,
+            "error": "HTTP Error 500: Internal Server Error"
+        })
+        self.assertTrue(mock_fp.closed)
+
+    def test_url_error(self):
+        mock_opener = MagicMock()
+        mock_opener.open.side_effect = urllib.error.URLError("Connection refused")
+
+        res = api_client.make_api_request(
+            "/api/status",
+            opener=mock_opener
+        )
+        self.assertEqual(res, {
+            "offline_flag": True,
+            "error": "Connection refused"
+        })
+
+    def test_generic_exception(self):
+        mock_opener = MagicMock()
+        mock_opener.open.side_effect = Exception("Crash")
+
+        res = api_client.make_api_request(
+            "/api/status",
+            opener=mock_opener
+        )
+        self.assertEqual(res, {
+            "success": False,
+            "error": "Crash"
+        })
+        self.assertNotIn("offline_flag", res)
+
+    def test_compatibility_wrappers(self):
+        mock_root = MagicMock()
+        with patch.object(WatsUpUI, 'setup_styles'), \
+             patch.object(WatsUpUI, 'create_widgets'), \
+             patch.object(WatsUpUI, 'start_background_polling'), \
+             patch.object(WatsUpUI, 'log_message'):
+            ui = WatsUpUI(mock_root)
+
+        with patch("api_client.load_ipc_token", return_value="wrapped_token") as mock_load:
+            ui.load_ipc_token()
+            self.assertEqual(ui.ipc_token, "wrapped_token")
+            mock_load.assert_called_once()
+
+        with patch("api_client.make_api_request", return_value={"ok": True}) as mock_request:
+            ui.ipc_token = "some_token"
+            res = ui.make_api_request("/test_path", data={"foo": "bar"}, timeout=5)
+            self.assertEqual(res, {"ok": True})
+            mock_request.assert_called_once_with(
+                "/test_path",
+                data={"foo": "bar"},
+                timeout=5,
+                ipc_token="some_token"
+            )
 
 if __name__ == '__main__':
     unittest.main()
