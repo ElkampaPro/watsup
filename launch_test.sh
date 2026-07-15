@@ -248,7 +248,7 @@ verify_perms() {
         echo "❌ Error: File/Dir does not exist: $file"
         return 1
     fi
-    if [ "$OSTYPE" = "msys" ] || [ "$OSTYPE" = "cygwin" ] || [[ "$OS" == *"Windows"* ]]; then
+    if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* || "${OS:-}" == *Windows* ]]; then
         SKIPPED_PERMS_COUNT=$((SKIPPED_PERMS_COUNT + 1))
         return 0
     fi
@@ -359,8 +359,8 @@ assert_safe_arg() {
     if [[ "$arg" =~ ^- ]] || [[ "$arg" =~ ^[+] ]] || [ -z "$arg" ]; then
         return 0
     fi
-    # Skip purely numeric strings (modes, etc.) and chmod symbolics
-    if [[ "$arg" =~ ^[0-9]+$ ]] || [[ "$arg" =~ ^[ugoa]*[-+=][rwx]+$ ]]; then
+    # Skip purely numeric strings (modes, etc.), chmod symbolics, and format strings starting with %
+    if [[ "$arg" =~ ^[0-9]+$ ]] || [[ "$arg" =~ ^[ugoa]*[-+=][rwx]+$ ]] || [[ "$arg" =~ ^% ]]; then
         return 0
     fi
     local norm_arg
@@ -607,6 +607,8 @@ for arg in "$@"; do
 done
 if [[ "$*" == *"engine.log"* ]]; then
     echo 6291456
+elif [[ "$*" == *"unbound_test_file"* ]]; then
+    echo 600
 else
     PATH="$SYSTEM_PATH" stat "$@"
 fi
@@ -751,6 +753,31 @@ test_nonexistent_evil_sibling_path_rejected() {
 
     assert_test_pass
     echo "✅ Non-existent Evil Sibling Path Rejected passed!"
+}
+
+# 1c. verify_perms unbound variable safety under set -u
+test_verify_perms_unbound_safety() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    echo "🧪 Running Test: verify_perms Unbound Safety Check..."
+    setup_success_mocks
+
+    local test_file="$TEST_TEMP_DIR/unbound_test_file"
+    touch "$test_file"
+
+    # Run verify_perms in a subshell with set -u and unsetting OS/OSTYPE
+    (
+        set -u
+        unset OS
+        unset OSTYPE
+        verify_perms "$test_file" 600
+    )
+    local status=$?
+    if [ $status -ne 0 ]; then
+        echo "❌ verify_perms failed or crashed when OS/OSTYPE were unbound!"
+        assert_test_fail
+    fi
+    assert_test_pass
+    echo "✅ verify_perms Unbound Safety Check passed!"
 }
 
 # 2. Boundary and Traversal Tests
@@ -1914,6 +1941,7 @@ test_npm_safety_matrix() {
 # Run all test cases in order
 test_sandbox_safety_enforced_on_mocks
 test_nonexistent_evil_sibling_path_rejected
+test_verify_perms_unbound_safety
 test_sourcing_traps
 test_boundary_checks
 test_sourcing_fails_on_symlink_escape
