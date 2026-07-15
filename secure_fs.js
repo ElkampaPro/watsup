@@ -13,7 +13,6 @@ function secureAtomicWriteFile(filePath, content, options = {}) {
         });
         fs.chmodSync(tempFile, 0o600);
         fs.renameSync(tempFile, filePath);
-        fs.chmodSync(filePath, 0o600);
     } finally {
         try {
             if (fs.lstatSync(tempFile)) {

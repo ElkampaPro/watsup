@@ -343,21 +343,55 @@ test('API contracts for payload schemas, inputs, and logout stubs verification',
 // 4. Phase 1: Fresh Import Process Safety
 test('Phase 1: Fresh Import Process Safety (zero process leaks)', () => {
     const { execSync } = require('child_process');
-    const modulesToTest = ['./secure_fs.js', './ipc_security.js', './logger.js', './jid_utils.js', './engine.js'];
+    const path = require('path');
+    const modulesToTest = ['secure_fs.js', 'ipc_security.js', 'logger.js', 'jid_utils.js', 'engine.js'];
 
-    for (const mod of modulesToTest) {
+    for (const modName of modulesToTest) {
+        const absPath = path.resolve(__dirname, modName).replace(/\\/g, '/');
         execSync(`node -e "
+            const assert = require('assert');
+            const fs = require('fs');
+            const net = require('net');
+            const http = require('http');
+
+            let writeCalled = 0;
+            let renameCalled = 0;
+            let chmodCalled = 0;
+            let mkdirCalled = 0;
+            let unlinkCalled = 0;
+            let netListenCalled = 0;
+            let httpListenCalled = 0;
+
+            fs.writeFileSync = () => { writeCalled++; };
+            fs.renameSync = () => { renameCalled++; };
+            fs.chmodSync = () => { chmodCalled++; };
+            fs.mkdirSync = () => { mkdirCalled++; };
+            fs.unlinkSync = () => { unlinkCalled++; };
+            net.Server.prototype.listen = () => { netListenCalled++; };
+            http.Server.prototype.listen = () => { httpListenCalled++; };
+
             const beforeUmask = process.umask();
             const beforeListeners1 = process.listeners('unhandledRejection').length;
             const beforeListeners2 = process.listeners('uncaughtException').length;
             const beforeListeners3 = process.listeners('SIGINT').length;
             const beforeListeners4 = process.listeners('SIGTERM').length;
-            require('${mod}');
-            if (process.umask() !== beforeUmask) throw new Error('umask changed');
-            if (process.listeners('unhandledRejection').length !== beforeListeners1) throw new Error('unhandledRejection handler added');
-            if (process.listeners('uncaughtException').length !== beforeListeners2) throw new Error('uncaughtException handler added');
-            if (process.listeners('SIGINT').length !== beforeListeners3) throw new Error('SIGINT handler added');
-            if (process.listeners('SIGTERM').length !== beforeListeners4) throw new Error('SIGTERM handler added');
+
+            // Import the module via absolute path
+            require('${absPath}');
+
+            assert.strictEqual(writeCalled, 0, 'Import must not call writeFileSync');
+            assert.strictEqual(renameCalled, 0, 'Import must not call renameSync');
+            assert.strictEqual(chmodCalled, 0, 'Import must not call chmodSync');
+            assert.strictEqual(mkdirCalled, 0, 'Import must not call mkdirSync');
+            assert.strictEqual(unlinkCalled, 0, 'Import must not call unlinkSync');
+            assert.strictEqual(netListenCalled, 0, 'Import must not call net.Server.listen');
+            assert.strictEqual(httpListenCalled, 0, 'Import must not call http.Server.listen');
+
+            assert.strictEqual(process.umask(), beforeUmask, 'umask must not change');
+            assert.strictEqual(process.listeners('unhandledRejection').length, beforeListeners1, 'unhandledRejection must not be registered');
+            assert.strictEqual(process.listeners('uncaughtException').length, beforeListeners2, 'uncaughtException must not be registered');
+            assert.strictEqual(process.listeners('SIGINT').length, beforeListeners3, 'SIGINT must not be registered');
+            assert.strictEqual(process.listeners('SIGTERM').length, beforeListeners4, 'SIGTERM must not be registered');
         "`, { stdio: 'pipe' });
     }
 });
@@ -474,11 +508,93 @@ test('Phase 1: secure_fs.js Atomic Guarantees and Cleanup', () => {
     }
 });
 
-// 7. Phase 1: ipc_security.js Token and Timing-Safe Verification
-test('Phase 1: ipc_security.js Token and Timing-Safe Verification', () => {
+// 7. Phase 1: secureAtomicWriteFile chmod failure test in child process
+test('Phase 1: secureAtomicWriteFile chmod failure test in child process', () => {
+    const { execSync } = require('child_process');
+    execSync(`node -e "
+        const assert = require('assert');
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
+        const secureFs = require('./secure_fs.js');
+
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-chmod-fail-'));
+        const destFile = path.join(tempDir, 'dest.txt');
+        fs.writeFileSync(destFile, 'original content', { encoding: 'utf8' });
+
+        // Mock chmodSync to throw error only when chmodding the temp file
+        const originalChmodSync = fs.chmodSync;
+        fs.chmodSync = (targetPath, mode) => {
+            if (typeof targetPath === 'string' && path.basename(targetPath).startsWith('.watsup_temp_')) {
+                throw new Error('mock chmod failure');
+            }
+            return originalChmodSync(targetPath, mode);
+        };
+
+        try {
+            assert.throws(() => {
+                secureFs.secureAtomicWriteFile(destFile, 'new content', { encoding: 'utf8' });
+            }, /mock chmod failure/);
+
+            // Assert destination is untouched
+            assert.strictEqual(fs.readFileSync(destFile, 'utf8'), 'original content');
+
+            // Assert no temp files remain
+            const files = fs.readdirSync(tempDir);
+            assert.strictEqual(files.filter(f => f.startsWith('.watsup_temp_')).length, 0);
+        } finally {
+            fs.chmodSync = originalChmodSync;
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+    "`, { stdio: 'pipe' });
+});
+
+// 8. Phase 1: ipc_security.js Token creation secrecy and permission checks
+test('Phase 1: ipc_security.js Token creation secrecy and permission checks', () => {
+    const ipcSecurity = require('./ipc_security.js');
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-token-sec-'));
+    const tokenFile = path.join(tempDir, 'token.txt');
+
+    // Intercept console.log, console.error, console.warn
+    const originalLog = console.log;
+    const originalError = console.error;
+    const originalWarn = console.warn;
+
+    let capturedOutput = '';
+    console.log = (...args) => { capturedOutput += args.join(' ') + '\\n'; };
+    console.error = (...args) => { capturedOutput += args.join(' ') + '\\n'; };
+    console.warn = (...args) => { capturedOutput += args.join(' ') + '\\n'; };
+
+    try {
+        const token = ipcSecurity.loadOrCreateToken(tokenFile);
+
+        // Verify it matches 64 hex pattern
+        assert.match(token, /^[a-fA-F0-9]{64}$/);
+
+        // Verify it was written to file
+        assert.ok(fs.existsSync(tokenFile));
+        assert.strictEqual(fs.readFileSync(tokenFile, 'utf8').trim(), token);
+
+        // Verify no log leak of the token
+        assert.strictEqual(capturedOutput.includes(token), false, 'Token must not leak in console.log/error/warn');
+
+        if (process.platform !== 'win32') {
+            const stats = fs.statSync(tokenFile);
+            assert.strictEqual(stats.mode & 0o777, 0o600, 'Token file must be 0600 on POSIX');
+        }
+    } finally {
+        console.log = originalLog;
+        console.error = originalError;
+        console.warn = originalWarn;
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (e) {}
+    }
+});
+
+// 9. Phase 1: ipc_security.js Timing-Safe Verification
+test('Phase 1: ipc_security.js Timing-Safe Verification', () => {
     const ipcSecurity = require('./ipc_security.js');
     const crypto = require('crypto');
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-p1-token-'));
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-p1-tsafe-'));
 
     try {
         const tokenFile = path.join(tempDir, 'token.txt');
@@ -575,7 +691,7 @@ test('Phase 1: ipc_security.js Token and Timing-Safe Verification', () => {
     }
 });
 
-// 8. Phase 1: engine.js Exports & Wrappers Verification
+// 10. Phase 1: engine.js Exports & Wrappers Verification
 test('Phase 1: engine.js Exports and Wrappers Verification', () => {
     const engine = require('./engine.js');
     const secureFs = require('./secure_fs.js');
