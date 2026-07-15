@@ -36,33 +36,38 @@ For files exceeding 1.95 GB:
 
 ---
 
-## 🛠️ Installation & Setup
+## 🛠️ Setup & Operations
 
-Follow these steps to configure and run the application on any standard Ubuntu system.
+WatsUp Desktop Streamer provides an automated installer and launcher script (`launch.sh`) that takes care of checking and auto-installing all system and package dependencies.
 
-### 1. Install System Prerequisites
+### 1. Fresh/Clean Install (e.g., New RDP Container)
 
-Open your terminal and install Node.js, npm, and Python's native GUI framework (Tkinter):
-
-```bash
-# Update package lists
-sudo apt update
-
-# Install Node.js, NPM, and Python3 Tkinter
-sudo apt install -y nodejs npm python3-tk
-```
-
-### 2. Install Project Dependencies
-
-Navigate to the project directory and install the required Node.js libraries:
+If you are setting up on a completely fresh RDP instance, you can clone and launch the application using a single command:
 
 ```bash
-# Navigate to project root
-cd watsup
-
-# Install background client packages
-npm install
+rm -rf ~/watsup && git clone https://github.com/ElkampaPro/watsup.git ~/watsup && cd ~/watsup && chmod +x launch.sh && ./launch.sh
 ```
+
+This command will:
+- Check for system prerequisites (`nodejs` v20 LTS, `python3`, `python3-tk`, `curl`, `lsof`, `ca-certificates`).
+- Install any missing system dependencies automatically (requires root or passwordless sudo).
+- Set up secure permissions (`0700` for directories, `0600` for files).
+- Create a desktop launcher shortcut at `~/Desktop/watsup.desktop` and register it in the desktop menus.
+- Build production Node.js modules using `npm ci` only if they are missing or corrupt.
+- Start the WhatsApp socket daemon and the GUI.
+
+### 2. Updating an Existing Install (Session Preservation)
+
+> [!WARNING]
+> Running the clean install command (`rm -rf ~/watsup ...`) on an existing installation will delete your WhatsApp pairing credentials and force you to re-scan the QR code.
+> 
+> To update the application without losing your pairing session, **never run `rm -rf`**. Instead, run:
+
+```bash
+cd ~/watsup && git pull --ff-only && ./launch.sh
+```
+
+This preserves the `auth_info_baileys`, `contacts_cache.json`, and `.watsup_ipc_token` files, ensuring a seamless update experience.
 
 ---
 

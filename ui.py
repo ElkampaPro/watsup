@@ -52,6 +52,7 @@ class WatsUpUI:
         self.qr_popup = None
         self.qr_photo = None
         self.upload_active = False
+        self.sending_queue = False
         self.contacts_fetched = False
         self.groups_synced = False
         self.last_status = "offline"
@@ -453,16 +454,23 @@ class WatsUpUI:
 
                 # Check dynamic upload progress
                 upload_progress = status_res.get("uploadProgress", {})
-                if upload_progress.get("active", False):
+                is_upload_active = upload_progress.get("active", False)
+                if is_upload_active:
                     percentage = upload_progress.get("percentage", 0)
                     file_name = upload_progress.get("fileName", "")
                     bytes_sent = self.format_bytes(upload_progress.get("bytesSent", 0))
                     total_bytes = self.format_bytes(upload_progress.get("totalBytes", 0))
+                    phase = upload_progress.get("phase", "streaming")
 
                     self.upload_active = True
-                    self.root.after(0, self.update_progress_ui, percentage, f"Streaming: {file_name}", f"{percentage}% ({bytes_sent}/{total_bytes})")
+                    if phase == "awaiting_confirmation":
+                        status_text = "Upload finished — waiting for WhatsApp confirmation"
+                        self.root.after(0, self.update_progress_ui, 99, status_text, f"99% ({bytes_sent}/{total_bytes})")
+                    else:
+                        self.root.after(0, self.update_progress_ui, percentage, f"Streaming: {file_name}", f"{percentage}% ({bytes_sent}/{total_bytes})")
                 else:
-                    if not self.upload_active:
+                    if not self.sending_queue:
+                        self.upload_active = False
                         self.root.after(0, self.update_progress_ui, 0, "Upload Progress: Idle", "0%")
                 # Use engine's groupsSynced flag to know exactly when to stop polling contacts
                 groups_synced = status_res.get("groupsSynced", False)
@@ -647,6 +655,7 @@ class WatsUpUI:
 
         self.log_message("Initiating stream pipeline...")
         self.upload_active = True # Speed up polling to 0.5s for smooth progress animation
+        self.sending_queue = True
 
         # Execute the transmission worker on a background thread so Tkinter remains completely responsive
         threading.Thread(target=self.transmission_worker, args=(recipient,), daemon=True).start()
@@ -985,6 +994,7 @@ class WatsUpUI:
         self.remove_btn.config(state="normal")
         self.recipient_combobox.config(state="normal")
         self.upload_active = False # Revert to slow polling (2.0s)
+        self.sending_queue = False
 
         self.log_message(message)
 

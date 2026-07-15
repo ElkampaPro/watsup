@@ -13,7 +13,19 @@ const {
     secureAtomicWriteFile,
     secureAtomicWriteJson,
     writeQrSecurely,
-    enforceSecurePermissions
+    enforceSecurePermissions,
+    fetchGroupsList,
+    rotateEngineLog,
+    formatErrorBriefly,
+    getSocketGeneration,
+    setSocketGeneration,
+    getLastSyncedGeneration,
+    setLastSyncedGeneration,
+    getCurrentGroupSyncPromise,
+    getCurrentGroupSyncPromiseGen,
+    setCurrentGroupSyncPromiseGen,
+    setSock,
+    getConnectionState
 } = require('./engine.js');
 
 function makeRequest(port, requestPath, method = 'GET', token = null, body = null) {
@@ -413,6 +425,179 @@ test('contacts_cache.json and qr.png are written with 0600 permissions on POSIX 
             assert.equal(qrStat.mode & 0o777, 0o600);
         }
     } finally {
+        fs.rmSync(tempDirectory, { recursive: true, force: true });
+    }
+});
+
+test('formatErrorBriefly redacts keys, sessions, tokens, and raw buffers', () => {
+    const sensitiveToken = 'a'.repeat(64);
+    const err1 = new Error('Connection failed because token ' + sensitiveToken + ' is invalid');
+    const brief1 = formatErrorBriefly(err1);
+    assert.match(brief1, /\[REDACTED_/);
+    assert.ok(!brief1.includes(sensitiveToken));
+
+    const err2 = { name: 'BaileysError', message: 'Failed to write session state', statusCode: 403, code: 'WRITE_FAIL' };
+    const brief2 = formatErrorBriefly(err2);
+    assert.equal(brief2, '[BaileysError] Failed to write [REDACTED_SESSION] state (Status: 403) (Code: WRITE_FAIL)');
+});
+
+test('rotateEngineLog copy-and-truncates engine.log if size exceeds 5MB limit', () => {
+    const logPath = path.join(__dirname, 'engine.log');
+    const backupPath = path.join(__dirname, 'engine.log.1');
+
+    // Cleanup first
+    try { fs.unlinkSync(logPath); } catch (_) {}
+    try { fs.unlinkSync(backupPath); } catch (_) {}
+
+    // Create a mock large file
+    const largeContent = 'A'.repeat(6 * 1024 * 1024); // 6MB
+    fs.writeFileSync(logPath, largeContent, { encoding: 'utf8', mode: 0o600 });
+
+    rotateEngineLog();
+
+    assert.ok(fs.existsSync(logPath));
+    assert.equal(fs.statSync(logPath).size, 0, 'Original engine.log should be truncated to 0.');
+    assert.ok(fs.existsSync(backupPath));
+    assert.equal(fs.statSync(backupPath).size, 6 * 1024 * 1024, 'Backup file should contain the original large log content.');
+
+    // Cleanup
+    try { fs.unlinkSync(logPath); } catch (_) {}
+    try { fs.unlinkSync(backupPath); } catch (_) {}
+});
+
+test('fetchGroupsList deduplicates concurrent group sync requests', async () => {
+    // Reset internal state
+    const state = getConnectionState();
+    state.status = 'connected';
+    state.groupsSynced = false;
+    setSocketGeneration(10);
+    setLastSyncedGeneration(-1);
+    setCurrentGroupSyncPromiseGen(-1);
+
+    let fetchCount = 0;
+    const mockSock = {
+        groupFetchAllParticipating: async () => {
+            fetchCount++;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            return { '123@g.us': { subject: 'Test Group' } };
+        }
+    };
+    setSock(mockSock);
+
+    // Call fetchGroupsList concurrently
+    const p1 = fetchGroupsList();
+    const p2 = fetchGroupsList();
+    const p3 = fetchGroupsList();
+
+    await Promise.all([p1, p2, p3]);
+
+    assert.equal(fetchCount, 1, 'groupFetchAllParticipating must be called exactly once.');
+    assert.equal(getLastSyncedGeneration(), 10, 'lastSyncedGeneration must be set to current socket generation.');
+});
+
+test('fetchGroupsList allows new sync on reconnect socket generation change and discards outdated results', async () => {
+    // Reset internal state
+    const state = getConnectionState();
+    state.status = 'connected';
+    state.groupsSynced = false;
+    setSocketGeneration(20);
+    setLastSyncedGeneration(-1);
+    setCurrentGroupSyncPromiseGen(-1);
+
+    let resolveFetchPromise;
+    const fetchPromise = new Promise((resolve) => {
+        resolveFetchPromise = resolve;
+    });
+
+    let fetchCount = 0;
+    const mockSock1 = {
+        groupFetchAllParticipating: async () => {
+            fetchCount++;
+            await fetchPromise; // Block until we simulate reconnect
+            return { '999@g.us': { subject: 'Stale Group' } };
+        }
+    };
+    setSock(mockSock1);
+
+    // Start sync 1 (socket generation 20)
+    const p1 = fetchGroupsList();
+
+    // Now simulate reconnect (socket generation changes to 21)
+    setSocketGeneration(21);
+    
+    let fetchCount2 = 0;
+    const mockSock2 = {
+        groupFetchAllParticipating: async () => {
+            fetchCount2++;
+            return { '888@g.us': { subject: 'Fresh Group' } };
+        }
+    };
+    setSock(mockSock2);
+
+    // Start sync 2 (socket generation 21)
+    const p2 = fetchGroupsList();
+
+    // Resolve first sync promise
+    resolveFetchPromise();
+
+    await Promise.all([p1, p2]);
+
+    assert.equal(fetchCount, 1, 'First mock socket fetch must be called.');
+    assert.equal(fetchCount2, 1, 'Second mock socket fetch must be called.');
+    assert.equal(getLastSyncedGeneration(), 21, 'lastSyncedGeneration should reflect the latest successful generation.');
+});
+
+test('POST /api/send transition progress phases correctly', async () => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'watsup-send-phase-'));
+    const dummyPath = path.join(tempDirectory, 'payload.txt');
+    fs.writeFileSync(dummyPath, 'a'.repeat(2 * 1024 * 1024), 'utf8'); // 2MB
+
+    const token = 'c'.repeat(64);
+    const deferred = createDeferred();
+    
+    const app = createApp({
+        ipcToken: token,
+        connectionState: { status: 'connected' },
+        getSock: () => ({
+            sendMessage: async (jid, content) => {
+                // Read the stream to trigger ProgressStream progress callbacks
+                content.document.stream.resume();
+                return deferred.promise;
+            }
+        })
+    });
+
+    const listener = await listen(app);
+    try {
+        const sendPromise = makeRequest(listener.port, '/api/send', 'POST', token, {
+            filePath: dummyPath,
+            recipient: '213661834572'
+        });
+
+        // Let's wait a brief moment for streaming phase to initialize and progress
+        await waitUntil(async () => {
+            const status = await makeRequest(listener.port, '/api/status', 'GET', token);
+            return status.body.uploadProgress.active === true && status.body.uploadProgress.phase === 'streaming';
+        });
+
+        // Let the stream finish reading entirely so it transitions to awaiting_confirmation
+        await waitUntil(async () => {
+            const status = await makeRequest(listener.port, '/api/status', 'GET', token);
+            return status.body.uploadProgress.phase === 'awaiting_confirmation';
+        }, 3000);
+
+        // Resolve sendMessage call to simulate WhatsApp successfully confirming the receive
+        deferred.resolve({ key: { id: 'msg123' } });
+
+        const result = await sendPromise;
+        assert.equal(result.statusCode, 200);
+
+        // Ensure status reflects completed
+        const finalStatus = await makeRequest(listener.port, '/api/status', 'GET', token);
+        assert.equal(finalStatus.body.uploadProgress.active, false);
+    } finally {
+        deferred.resolve();
+        await closeServer(listener.server);
         fs.rmSync(tempDirectory, { recursive: true, force: true });
     }
 });

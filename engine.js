@@ -15,12 +15,50 @@ const fs = require('fs');
 const path = require('path');
 const { Transform } = require('stream');
 
+function formatErrorBriefly(err) {
+    if (!err) return 'Unknown error';
+    let message = err.message || String(err);
+    message = message.replace(/[a-fA-F0-9]{64}/g, '[REDACTED_HEX_64]');
+    message = message.replace(/(?:session|token|qr|key)/gi, (m) => `[REDACTED_${m.toUpperCase()}]`);
+    const errorType = err.name || 'Error';
+    const statusCode = err.statusCode || (err.output && err.output.statusCode) || '';
+    const code = err.code || '';
+    let brief = `[${errorType}] ${message}`;
+    if (statusCode) brief += ` (Status: ${statusCode})`;
+    if (code) brief += ` (Code: ${code})`;
+    return brief;
+}
+
+function rotateEngineLog() {
+    const logPath = path.join(__dirname, 'engine.log');
+    const backupPath = path.join(__dirname, 'engine.log.1');
+    const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+    try {
+        if (fs.existsSync(logPath)) {
+            const stats = fs.statSync(logPath);
+            if (stats.size > MAX_SIZE) {
+                fs.copyFileSync(logPath, backupPath);
+                fs.truncateSync(logPath, 0);
+                fs.chmodSync(logPath, 0o600);
+                fs.chmodSync(backupPath, 0o600);
+            }
+        }
+    } catch (err) {
+        console.warn('[Engine] Warning: Log rotation failed:', err.message);
+    }
+}
+
 // Global process safety handlers to catch any Baileys internal async errors
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('[Engine] Unhandled Rejection at:', promise, 'reason:', reason);
+    const brief = formatErrorBriefly(reason);
+    if (brief.includes('init queries Timed Out') || brief.includes('Timed Out')) {
+        console.warn(`[Engine] Connection Warning (init queries Timed Out): ${brief}`);
+    } else {
+        console.error(`[Engine] Unhandled Rejection: ${brief}`);
+    }
 });
 process.on('uncaughtException', (err) => {
-    console.error('[Engine] Uncaught Exception:', err);
+    console.error('[Engine] Uncaught Exception:', formatErrorBriefly(err));
 });
 
 const PORT = 5001;
@@ -97,6 +135,11 @@ let connectionState = {
     qrAvailable: false,
     groupsSynced: false
 };
+
+let currentSocketGeneration = 0;
+let lastSyncedGeneration = -1;
+let currentGroupSyncPromise = null;
+let currentGroupSyncPromiseGen = -1;
 
 const contactsMap = new Map();
 
@@ -260,6 +303,7 @@ function enforceSecurePermissions(directory = authDir) {
  * Spawns the raw WebSocket connection to WhatsApp Web servers
  */
 async function connectToWhatsApp() {
+    currentSocketGeneration++;
     console.log('[Baileys] Launching WhatsApp WebSocket driver...');
     connectionState.status = 'connecting';
     connectionState.userInfo = null;
@@ -271,9 +315,22 @@ async function connectToWhatsApp() {
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-    // High efficiency, silent logging configuration
+    // High efficiency, silent logging configuration with redaction
     const silentLogger = pino({
         level: 'warn',
+        redact: {
+            paths: [
+                '*.content',
+                '*.raw',
+                '*.key',
+                '*.message.conversation',
+                '*.message.extendedTextMessage',
+                'token',
+                'ipcToken',
+                'qr'
+            ],
+            censor: '[REDACTED]'
+        },
         transport: {
             target: 'pino-pretty',
             options: { colorize: true }
@@ -447,34 +504,54 @@ async function connectToWhatsApp() {
 let lastGroupSyncTime = 0;
 async function fetchGroupsList() {
     if (!sock || connectionState.status !== 'connected') return;
-    const now = Date.now();
-    // Throttle group syncs to at most once every 60 seconds, unless we have no groups in cache yet
-    const hasGroups = Array.from(contactsMap.keys()).some(k => k.endsWith('@g.us'));
-    if (hasGroups && (now - lastGroupSyncTime < 60000)) {
+    const myGen = currentSocketGeneration;
+
+    if (currentGroupSyncPromise && currentGroupSyncPromiseGen === myGen) {
+        return currentGroupSyncPromise;
+    }
+
+    if (lastSyncedGeneration === myGen) {
         connectionState.groupsSynced = true;
         return;
     }
 
-    try {
-        console.log('[Engine] Syncing WhatsApp groups list from server...');
-        const groups = await sock.groupFetchAllParticipating();
-        let updated = false;
-        for (const jid in groups) {
-            const group = groups[jid];
-            const name = `👥 [Group] ${group.subject}`;
-            contactsMap.set(jid, { id: jid, name });
-            updated = true;
+    currentGroupSyncPromiseGen = myGen;
+    currentGroupSyncPromise = (async () => {
+        try {
+            console.log('[Engine] Syncing WhatsApp groups list from server...');
+            const groups = await sock.groupFetchAllParticipating();
+
+            if (currentSocketGeneration !== myGen) {
+                console.log('[Engine] Discarding group sync result from outdated socket generation.');
+                return;
+            }
+
+            let updated = false;
+            for (const jid in groups) {
+                const group = groups[jid];
+                const name = `👥 [Group] ${group.subject}`;
+                contactsMap.set(jid, { id: jid, name });
+                updated = true;
+            }
+            if (updated) {
+                saveContactsCache();
+                console.log(`[Engine] Synced ${Object.keys(groups).length} WhatsApp groups successfully.`);
+            }
+            lastSyncedGeneration = myGen;
+            connectionState.groupsSynced = true;
+        } catch (err) {
+            console.error('[Engine] Error syncing WhatsApp groups list:', formatErrorBriefly(err));
+            if (currentSocketGeneration === myGen) {
+                connectionState.groupsSynced = true;
+            }
+        } finally {
+            if (currentSocketGeneration === myGen) {
+                currentGroupSyncPromise = null;
+            }
         }
-        if (updated) {
-            saveContactsCache();
-            console.log(`[Engine] Synced ${Object.keys(groups).length} WhatsApp groups successfully.`);
-        }
-        lastGroupSyncTime = now;
-        connectionState.groupsSynced = true;
-    } catch (err) {
-        console.error('[Engine] Error syncing WhatsApp groups list:', err);
-        connectionState.groupsSynced = true;
-    }
+    })();
+
+    return currentGroupSyncPromise;
 }
 
 /* ==========================================
@@ -500,7 +577,9 @@ function createApp(config = {}) {
         fileName: '',
         bytesSent: 0,
         totalBytes: 0,
-        percentage: 0
+        percentage: 0,
+        phase: 'idle',
+        error: null
     };
 
     app.use(express.json({ limit: '10kb' }));
@@ -598,6 +677,7 @@ function createApp(config = {}) {
             sendInProgress = true;
             lockAcquired = true;
 
+            const startTime = Date.now();
             const fileName = path.basename(filePath);
             const totalBytes = fileStats.size;
             Object.assign(uploadProgress, {
@@ -605,7 +685,9 @@ function createApp(config = {}) {
                 fileName,
                 bytesSent: 0,
                 totalBytes,
-                percentage: 0
+                percentage: 0,
+                phase: 'streaming',
+                error: null
             });
 
             let lastLoggedPercent = -1;
@@ -613,6 +695,10 @@ function createApp(config = {}) {
             const progressStream = fileStream.pipe(new ProgressStream(totalBytes, (bytesRead, total, percentage) => {
                 uploadProgress.bytesSent = bytesRead;
                 uploadProgress.percentage = percentage;
+
+                if (bytesRead >= total && uploadProgress.phase === 'streaming') {
+                    uploadProgress.phase = 'awaiting_confirmation';
+                }
 
                 const rounded = Math.floor(percentage / 10) * 10;
                 if (rounded > lastLoggedPercent) {
@@ -627,14 +713,24 @@ function createApp(config = {}) {
                 fileName
             });
 
+            const durationMs = Date.now() - startTime;
+            const sizeMb = totalBytes / (1024 * 1024);
+            const speedMbps = durationMs > 0 ? (sizeMb * 8) / (durationMs / 1000) : 0;
+
             uploadProgress.bytesSent = totalBytes;
             uploadProgress.percentage = 100;
+            uploadProgress.phase = 'completed';
+
+            console.log(`[Pipeline] Successfully sent ${fileName} (${sizeMb.toFixed(2)} MB) to ${jid.split('@')[0]} in ${(durationMs / 1000).toFixed(2)}s (${speedMbps.toFixed(2)} Mbps)`);
+
             res.json({ success: true, message: 'File streamed and sent successfully!' });
         } catch (err) {
             if (fileStream) {
                 try { fileStream.destroy(); } catch (cleanupErr) {}
             }
-            console.error('[Pipeline] High-performance transfer failed:', err);
+            console.error('[Pipeline] High-performance transfer failed:', formatErrorBriefly(err));
+            uploadProgress.phase = 'failed';
+            uploadProgress.error = err.message || 'Transmission failed';
             res.status(500).json({ success: false, error: 'Transmission failed: Internal server error' });
         } finally {
             if (lockAcquired) {
@@ -656,6 +752,7 @@ function createApp(config = {}) {
 }
 
 function startEngine() {
+    rotateEngineLog();
     if (process.platform !== 'win32') {
         process.umask(0o077);
     }
@@ -703,5 +800,17 @@ module.exports = {
     secureAtomicWriteFile,
     secureAtomicWriteJson,
     writeQrSecurely,
-    enforceSecurePermissions
+    enforceSecurePermissions,
+    fetchGroupsList,
+    rotateEngineLog,
+    formatErrorBriefly,
+    getSocketGeneration: () => currentSocketGeneration,
+    setSocketGeneration: (val) => { currentSocketGeneration = val; },
+    getLastSyncedGeneration: () => lastSyncedGeneration,
+    setLastSyncedGeneration: (val) => { lastSyncedGeneration = val; },
+    getCurrentGroupSyncPromise: () => currentGroupSyncPromise,
+    getCurrentGroupSyncPromiseGen: () => currentGroupSyncPromiseGen,
+    setCurrentGroupSyncPromiseGen: (val) => { currentGroupSyncPromiseGen = val; },
+    setSock: (s) => { sock = s; },
+    getConnectionState: () => connectionState
 };
