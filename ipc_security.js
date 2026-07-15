@@ -22,7 +22,7 @@ function loadOrCreateToken(customTokenPath) {
         const newToken = crypto.randomBytes(32).toString('hex');
         const dir = require('path').dirname(customTokenPath);
         temporaryPath = require('path').join(dir, `.watsup_temp_token_${crypto.randomBytes(4).toString('hex')}.tmp`);
-        
+
         secureFs.secureAtomicWriteFile(temporaryPath, newToken, { encoding: 'utf8' });
         fs.chmodSync(temporaryPath, 0o600);
         fs.renameSync(temporaryPath, customTokenPath);

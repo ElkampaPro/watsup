@@ -420,7 +420,7 @@ test('Phase 1 Modular Security and Utilities robust verification', async () => {
 
         // middleware checking
         const middleware = ipcSecurity.createIpcAuthMiddleware(dummyToken);
-        
+
         // mock request / response / next
         let nextCalled = 0;
         const mockReq = { headers: {} };
