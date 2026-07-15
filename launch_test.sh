@@ -359,8 +359,8 @@ assert_safe_arg() {
     if [[ "$arg" =~ ^- ]] || [[ "$arg" =~ ^[+] ]] || [ -z "$arg" ]; then
         return 0
     fi
-    # Skip purely numeric strings (modes, etc.), chmod symbolics, and format strings starting with %
-    if [[ "$arg" =~ ^[0-9]+$ ]] || [[ "$arg" =~ ^[ugoa]*[-+=][rwx]+$ ]] || [[ "$arg" =~ ^% ]]; then
+    # Skip purely numeric strings (modes, etc.), chmod symbolics, and specific stat format specifiers
+    if [[ "$arg" =~ ^[0-9]+$ ]] || [[ "$arg" =~ ^[ugoa]*[-+=][rwx]+$ ]] || [ "$arg" = "%a" ] || [ "$arg" = "%Op" ]; then
         return 0
     fi
     local norm_arg
@@ -605,10 +605,8 @@ source "$(dirname "$0")/path_safety_check.sh"
 for arg in "$@"; do
     assert_safe_arg "$arg"
 done
-if [[ "$*" == *"engine.log"* ]]; then
+if [[ "$*" == *"-c%s"* || "$*" == *"-f%z"* ]] && [[ "$*" == *"engine.log"* ]]; then
     echo 6291456
-elif [[ "$*" == *"unbound_test_file"* ]]; then
-    echo 600
 else
     PATH="$SYSTEM_PATH" stat "$@"
 fi
@@ -761,15 +759,21 @@ test_verify_perms_unbound_safety() {
     echo "🧪 Running Test: verify_perms Unbound Safety Check..."
     setup_success_mocks
 
-    local test_file="$TEST_TEMP_DIR/unbound_test_file"
-    touch "$test_file"
+    local test_file
+    test_file=$(PATH="$SYSTEM_PATH" mktemp "$TEST_TEMP_DIR/unbound_test_XXXXXX")
+
+    local real_perms
+    real_perms=$(PATH="$SYSTEM_PATH" stat -c "%a" "$test_file" 2>/dev/null || PATH="$SYSTEM_PATH" stat -f "%Op" "$test_file" 2>/dev/null | cut -c 4-6)
+    if [ -z "$real_perms" ]; then
+        real_perms="600"
+    fi
 
     # Run verify_perms in a subshell with set -u and unsetting OS/OSTYPE
     (
         set -u
         unset OS
         unset OSTYPE
-        verify_perms "$test_file" 600
+        verify_perms "$test_file" "$real_perms"
     )
     local status=$?
     if [ $status -ne 0 ]; then
@@ -778,6 +782,56 @@ test_verify_perms_unbound_safety() {
     fi
     assert_test_pass
     echo "✅ verify_perms Unbound Safety Check passed!"
+}
+
+# 1d. stat mock queries and verify_perms validation
+test_stat_mock_queries_and_verify_perms() {
+    TESTS_RUN=$((TESTS_RUN + 1))
+    echo "🧪 Running Test: Stat Mock Queries and verify_perms validation..."
+    setup_success_mocks
+
+    # Create dummy engine.log
+    touch "$WATSUP_LOG_PATH"
+
+    # 1. Size query to engine.log returns 6291456
+    local size_c size_f
+    size_c=$("$TEST_BIN_DIR/stat" -c%s "$WATSUP_LOG_PATH" 2>/dev/null)
+    size_f=$("$TEST_BIN_DIR/stat" -f%z "$WATSUP_LOG_PATH" 2>/dev/null)
+
+    if [ "$size_c" != "6291456" ] && [ "$size_f" != "6291456" ]; then
+        echo "❌ Size query mock did not return 6291456! size_c='$size_c' size_f='$size_f'"
+        assert_test_fail
+    fi
+
+    # 2. Permission query does not return 6291456, but returns valid octal
+    local perm_c perm_f
+    perm_c=$("$TEST_BIN_DIR/stat" -c "%a" "$WATSUP_LOG_PATH" 2>/dev/null)
+    perm_f=$("$TEST_BIN_DIR/stat" -f "%Op" "$WATSUP_LOG_PATH" 2>/dev/null | cut -c 4-6)
+
+    if [ "$perm_c" = "6291456" ] || [ "$perm_f" = "6291456" ]; then
+        echo "❌ Permission query returned size mock! perm_c='$perm_c' perm_f='$perm_f'"
+        assert_test_fail
+    fi
+
+    local actual_perm=""
+    if [ -n "$perm_c" ] && [[ "$perm_c" =~ ^[0-7]+$ ]]; then
+        actual_perm="$perm_c"
+    elif [ -n "$perm_f" ] && [[ "$perm_f" =~ ^[0-7]+$ ]]; then
+        actual_perm="$perm_f"
+    fi
+
+    if [ -z "$actual_perm" ] && [ "$OSTYPE" != "msys" ] && [ "$OSTYPE" != "cygwin" ] && [[ "$OS" != *"Windows"* ]]; then
+        echo "❌ Permissions query failed to return valid octal!"
+        assert_test_fail
+    fi
+
+    # 3. verify_perms succeeds after log rotation (using the actual perm)
+    if [ -n "$actual_perm" ]; then
+        verify_perms "$WATSUP_LOG_PATH" "$actual_perm" || assert_test_fail
+    fi
+
+    assert_test_pass
+    echo "✅ Stat Mock Queries and verify_perms validation passed!"
 }
 
 # 2. Boundary and Traversal Tests
@@ -1942,6 +1996,7 @@ test_npm_safety_matrix() {
 test_sandbox_safety_enforced_on_mocks
 test_nonexistent_evil_sibling_path_rejected
 test_verify_perms_unbound_safety
+test_stat_mock_queries_and_verify_perms
 test_sourcing_traps
 test_boundary_checks
 test_sourcing_fails_on_symlink_escape
