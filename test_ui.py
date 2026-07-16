@@ -568,5 +568,231 @@ print("ok")
                 ipc_token="some_token"
             )
 
+class TestCharacterization(unittest.TestCase):
+    def setUp(self):
+        self.root = DummyTk()
+        with patch.object(WatsUpUI, 'setup_styles'), \
+             patch.object(WatsUpUI, 'create_widgets'), \
+             patch.object(WatsUpUI, 'start_background_polling'), \
+             patch.object(WatsUpUI, 'log_message'):
+            self.ui = WatsUpUI(self.root)
+        self.ui.log_message = MagicMock()
+        self.ui.refresh_queue_table = MagicMock()
+        self.ui.post_transmission_ui = MagicMock()
+        self.ui.show_splitting_banner = MagicMock()
+        self.ui.hide_splitting_banner = MagicMock()
+
+    def test_characterization_manifest_rar(self):
+        temp_dir = tempfile.mkdtemp()
+        orig_file = os.path.join(temp_dir, "test_rar.zip")
+        with open(orig_file, "wb") as f:
+            f.write(b"a" * 100)
+        part_paths = [
+            os.path.join(temp_dir, "test_rar.zip.part01.rar"),
+            os.path.join(temp_dir, "test_rar.zip.part02.rar")
+        ]
+        for p in part_paths:
+            with open(p, "wb") as f:
+                f.write(b"b" * 50)
+        try:
+            self.ui.create_manifest_file(orig_file, part_paths, is_rar=True)
+            manifest_path = os.path.join(temp_dir, "manifest.txt")
+            self.assertTrue(os.path.exists(manifest_path))
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            expected = (
+                "Original File: test_rar.zip\n"
+                "Total Size: 100 bytes (100.0 Bytes)\n"
+                "Number of Parts: 2\n"
+                "Type: RAR Volume Set (Compressed/Stored)\n\n"
+                "Parts List:\n"
+                "  1. test_rar.zip.part01.rar (50.0 Bytes)\n"
+                "  2. test_rar.zip.part02.rar (50.0 Bytes)\n\n"
+                "How to merge and restore the original file:\n"
+                "  Use WinRAR, unrar, or 7-Zip to extract the first part (*.part1.rar or *.part01.rar) to reconstruct the file automatically.\n"
+            )
+            self.assertEqual(content, expected)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_characterization_manifest_raw(self):
+        temp_dir = tempfile.mkdtemp()
+        orig_file = os.path.join(temp_dir, "test_raw.zip")
+        with open(orig_file, "wb") as f:
+            f.write(b"a" * 120)
+        part_paths = [
+            os.path.join(temp_dir, "test_raw.zip.part001"),
+            os.path.join(temp_dir, "test_raw.zip.part002")
+        ]
+        for p in part_paths:
+            with open(p, "wb") as f:
+                f.write(b"b" * 60)
+        try:
+            self.ui.create_manifest_file(orig_file, part_paths, is_rar=False)
+            manifest_path = os.path.join(temp_dir, "manifest.txt")
+            self.assertTrue(os.path.exists(manifest_path))
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            expected = (
+                "Original File: test_raw.zip\n"
+                "Total Size: 120 bytes (120.0 Bytes)\n"
+                "Number of Parts: 2\n"
+                "Type: Raw Binary Chunks\n\n"
+                "Parts List:\n"
+                "  1. test_raw.zip.part001 (60.0 Bytes)\n"
+                "  2. test_raw.zip.part002 (60.0 Bytes)\n\n"
+                "How to merge and restore the original file:\n"
+                "  Combine the parts sequentially using command line tools:\n"
+                "  - Windows Command Prompt:\n"
+                "    copy /b test_raw.zip.part001 + test_raw.zip.part002 \"test_raw.zip\"\n"
+                "  - Linux/macOS Terminal:\n"
+                "    cat test_raw.zip.part001 test_raw.zip.part002 > \"test_raw.zip\"\n"
+            )
+            self.assertEqual(content, expected)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_characterization_raw_split_naming_sizing(self):
+        temp_dir = tempfile.mkdtemp()
+        orig_file = os.path.join(temp_dir, "test_naming.zip")
+        with open(orig_file, "wb") as f:
+            f.write(b"a" * 25)
+        self.ui.max_split_size = 10
+        try:
+            with patch('shutil.which', return_value=None):
+                part_paths, is_split = self.ui.split_large_file(orig_file)
+                self.assertTrue(is_split)
+                # 3 parts + manifest = 4 elements
+                self.assertEqual(len(part_paths), 4)
+                self.assertEqual(os.path.basename(part_paths[-1]), "manifest.txt")
+                self.assertEqual(os.path.basename(part_paths[0]), "test_naming.zip.part001")
+                self.assertEqual(os.path.basename(part_paths[1]), "test_naming.zip.part002")
+                self.assertEqual(os.path.basename(part_paths[2]), "test_naming.zip.part003")
+                # sizes: 25 bytes split equally into 3 parts -> math.ceil(25/3) = 9 bytes per part, last part is 7 bytes
+                self.assertEqual(os.path.getsize(part_paths[0]), 9)
+                self.assertEqual(os.path.getsize(part_paths[1]), 9)
+                self.assertEqual(os.path.getsize(part_paths[2]), 7)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_characterization_rar_natural_sorting(self):
+        import re
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+        items = ["file.part10.rar", "file.part2.rar", "file.part1.rar"]
+        sorted_items = sorted(items, key=natural_sort_key)
+        self.assertEqual(sorted_items, ["file.part1.rar", "file.part2.rar", "file.part10.rar"])
+
+    def test_characterization_rar_fallback_on_timeout(self):
+        temp_dir = tempfile.mkdtemp()
+        orig_file = os.path.join(temp_dir, "test_timeout.zip")
+        with open(orig_file, "wb") as f:
+            f.write(b"a" * 25)
+        self.ui.max_split_size = 10
+        try:
+            import subprocess
+            with patch('shutil.which', return_value="/usr/bin/rar"), \
+                 patch('subprocess.run', side_effect=subprocess.TimeoutExpired(cmd=[], timeout=10)):
+                part_paths, is_split = self.ui.split_large_file(orig_file)
+                self.assertTrue(is_split)
+                self.assertEqual(len(part_paths), 4)
+                self.assertEqual(os.path.basename(part_paths[-1]), "manifest.txt")
+                self.assertEqual(os.path.basename(part_paths[0]), "test_timeout.zip.part001")
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_characterization_rar_fallback_on_failure(self):
+        temp_dir = tempfile.mkdtemp()
+        orig_file = os.path.join(temp_dir, "test_fail.zip")
+        with open(orig_file, "wb") as f:
+            f.write(b"a" * 25)
+        self.ui.max_split_size = 10
+        try:
+            import subprocess
+            with patch('shutil.which', return_value="/usr/bin/rar"), \
+                 patch('subprocess.run', side_effect=subprocess.CalledProcessError(1, cmd=[])):
+                part_paths, is_split = self.ui.split_large_file(orig_file)
+                self.assertTrue(is_split)
+                self.assertEqual(len(part_paths), 4)
+                self.assertEqual(os.path.basename(part_paths[-1]), "manifest.txt")
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_characterization_exception_on_write_cleanup(self):
+        temp_dir = tempfile.mkdtemp()
+        orig_file = os.path.join(temp_dir, "test_write_exc.zip")
+        with open(orig_file, "wb") as f:
+            f.write(b"a" * 25)
+        self.ui.max_split_size = 10
+        
+        original_open = open
+        def mock_open(file, mode='r', *args, **kwargs):
+            if 'w' in mode and "watsup_temp_split_" in file:
+                raise IOError("Write error")
+            return original_open(file, mode, *args, **kwargs)
+
+        try:
+            with patch('shutil.which', return_value=None), \
+                 patch('builtins.open', side_effect=mock_open):
+                with self.assertRaises(IOError):
+                    self.ui.split_large_file(orig_file)
+                if self.ui.current_temp_dir:
+                    self.assertFalse(os.path.exists(self.ui.current_temp_dir))
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_characterization_original_file_untouched(self):
+        temp_dir = tempfile.mkdtemp()
+        orig_file = os.path.join(temp_dir, "original.zip")
+        orig_data = b"a" * 25
+        with open(orig_file, "wb") as f:
+            f.write(orig_data)
+        self.ui.max_split_size = 10
+        try:
+            with patch('shutil.which', return_value=None):
+                part_paths, is_split = self.ui.split_large_file(orig_file)
+                self.assertTrue(is_split)
+                self.assertTrue(os.path.exists(orig_file))
+                with open(orig_file, "rb") as f:
+                    self.assertEqual(f.read(), orig_data)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_characterization_safe_cleanup_sanitization(self):
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        with patch('shutil.rmtree') as mock_rmtree:
+            self.ui.safe_cleanup_temp_dir("")
+            self.ui.safe_cleanup_temp_dir(project_dir)
+            self.ui.safe_cleanup_temp_dir(os.path.join(project_dir, "..", "some_sibling"))
+            mock_rmtree.assert_not_called()
+
+    def test_characterization_send_exception_queue_preservation(self):
+        self.ui.selected_files = ["/path/to/file1.txt", "/path/to/file2.txt", "/path/to/file3.txt"]
+        self.ui.contacts_data = {"👤 Alice": "123@s.whatsapp.net"}
+        self.ui.split_large_file = MagicMock(side_effect=lambda f: ([f], False))
+        
+        def mock_request(path, data=None, timeout=8):
+            if data and "file1.txt" in data["filePath"]:
+                return {"success": True}
+            elif data and "file2.txt" in data["filePath"]:
+                raise Exception("Network connection lost")
+            return {"success": True}
+            
+        self.ui.make_api_request = MagicMock(side_effect=mock_request)
+        
+        with patch('os.path.exists', return_value=True):
+            self.ui.transmission_worker("👤 Alice")
+            self.assertIn("/path/to/file2.txt", self.ui.selected_files)
+            self.assertIn("/path/to/file3.txt", self.ui.selected_files)
+            self.ui.post_transmission_ui.assert_called_with(False, "Worker exception: Network connection lost")
+
+    def test_characterization_wrapper_signatures(self):
+        self.assertTrue(hasattr(self.ui, 'format_bytes'))
+        self.assertTrue(hasattr(self.ui, 'create_manifest_file'))
+        self.assertTrue(hasattr(self.ui, 'safe_cleanup_temp_dir'))
+        self.assertTrue(hasattr(self.ui, 'split_large_file'))
+        self.assertTrue(hasattr(self.ui, 'transmission_worker'))
+
 if __name__ == '__main__':
     unittest.main()
