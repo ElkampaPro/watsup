@@ -7,7 +7,7 @@
     "start": "node engine.js",
     "test": "node --test test_engine.js test_contracts.js",
     "test:node": "node --test test_engine.js test_contracts.js",
-    "test:python": "python test_ui.py",
+    "test:python": "python -m unittest discover -s . -p \"test_*.py\"",
     "test:shell": "bash launch_test.sh",
     "test:all": "npm run test:node && npm run test:python",
     "test:all:linux": "npm run test:node && npm run test:python && npm run test:shell",

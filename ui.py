@@ -13,6 +13,8 @@ import os
 import threading
 import time
 import api_client
+import file_splitter
+import transmission_helper
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -56,6 +58,7 @@ class WatsUpUI:
         self.groups_synced = False
         self.last_status = "offline"
         self.fetching_contacts = False
+        self.current_temp_dir = None
 
         # Custom TTK styles
         self.setup_styles()
@@ -678,41 +681,9 @@ class WatsUpUI:
         threading.Thread(target=self.transmission_worker, args=(recipient,), daemon=True).start()
 
     def create_manifest_file(self, original_path, part_paths, is_rar):
-        try:
+        if part_paths:
             dir_name = os.path.dirname(part_paths[0])
-            manifest_path = os.path.join(dir_name, "manifest.txt")
-            orig_name = os.path.basename(original_path)
-            orig_size = os.path.getsize(original_path)
-
-            with open(manifest_path, "w", encoding="utf-8") as f:
-                f.write(f"Original File: {orig_name}\n")
-                f.write(f"Total Size: {orig_size} bytes ({self.format_bytes(orig_size)})\n")
-                f.write(f"Number of Parts: {len(part_paths)}\n")
-                f.write(f"Type: {'RAR Volume Set (Compressed/Stored)' if is_rar else 'Raw Binary Chunks'}\n\n")
-                f.write("Parts List:\n")
-                for idx, p in enumerate(part_paths):
-                    f.write(f"  {idx+1}. {os.path.basename(p)} ({self.format_bytes(os.path.getsize(p))})\n")
-
-                f.write("\nHow to merge and restore the original file:\n")
-                if is_rar:
-                    f.write("  Use WinRAR, unrar, or 7-Zip to extract the first part (*.part1.rar or *.part01.rar) to reconstruct the file automatically.\n")
-                else:
-                    f.write("  Combine the parts sequentially using command line tools:\n")
-                    f.write("  - Windows Command Prompt:\n")
-                    parts_cmd_win = " + ".join([os.path.basename(p) for p in part_paths])
-                    f.write(f"    copy /b {parts_cmd_win} \"{orig_name}\"\n")
-                    f.write("  - Linux/macOS Terminal:\n")
-                    parts_cmd_nix = " ".join([os.path.basename(p) for p in part_paths])
-                    f.write(f"    cat {parts_cmd_nix} > \"{orig_name}\"\n")
-            self.log_message(f"Created manifest instructions: {os.path.basename(manifest_path)}")
-        except Exception as e:
-            self.log_message(f"Failed to create manifest file: {str(e)}")
-
-    def cleanup_temp_dir(self, temp_dir):
-        if os.path.exists(temp_dir):
-            for f in os.listdir(temp_dir):
-                try: os.remove(os.path.join(temp_dir, f))
-                except: pass
+            file_splitter.create_manifest_file(original_path, part_paths, dir_name, is_rar, file_splitter.format_bytes, self.log_message)
 
     def show_splitting_banner(self, file_name, file_size, is_rar=True):
         size_str = self.format_bytes(file_size)
@@ -725,152 +696,53 @@ class WatsUpUI:
         self.splitting_banner.pack_forget()
 
     def safe_cleanup_temp_dir(self, temp_dir):
-        if not temp_dir:
-            return
-        try:
-            project_dir = os.path.dirname(os.path.abspath(__file__))
-            abs_temp = os.path.abspath(temp_dir)
-            abs_proj = os.path.abspath(project_dir)
-
-            # Security validations to avoid destructive operations outside project
-            try:
-                is_inside = os.path.commonpath([abs_proj, abs_temp]) == abs_proj
-            except ValueError:
-                is_inside = False
-            is_correct_name = os.path.basename(abs_temp).startswith("watsup_temp_split_")
-
-            if is_inside and is_correct_name and os.path.exists(abs_temp):
-                import shutil
-                shutil.rmtree(abs_temp, ignore_errors=True)
-                self.log_message(f"🧹 Cleaned up temporary split directory: {os.path.basename(abs_temp)}")
-        except Exception as e:
-            self.log_message(f"Cleanup warning: {str(e)}")
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        file_splitter.safe_cleanup_temp_dir(temp_dir, project_dir, self.log_message)
 
     def split_large_file(self, filePath):
-        import math
-        import uuid
-        import tempfile
-        import shutil
-        import subprocess
-        import re
-
+        project_dir = os.path.dirname(os.path.abspath(__file__))
         file_size = os.path.getsize(filePath)
         limit = getattr(self, 'max_split_size', 1950 * 1024 * 1024)
-        if file_size <= limit:
-            return [filePath], False
 
-        # Calculate equal part size dynamically
-        num_parts = math.ceil(file_size / limit)
-        part_size_bytes = math.ceil(file_size / num_parts)
-        part_size_mb = math.ceil(part_size_bytes / (1024 * 1024))
-
-        file_name = os.path.basename(filePath)
-        rar_bin = shutil.which("rar")
-        is_rar = bool(rar_bin)
-
-        self.log_message(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({self.format_bytes(file_size)}) into {num_parts} equally-sized parts (~{self.format_bytes(part_size_bytes)} each). Please wait, zero-CPU / zero-RAM active...")
-        self.safe_after(0, self.show_splitting_banner, file_name, file_size, is_rar)
-
-        # Create unique temp folder inside workspace using tempfile.mkdtemp
-        project_dir = os.path.dirname(os.path.abspath(__file__))
-        temp_dir = tempfile.mkdtemp(prefix="watsup_temp_split_", dir=project_dir)
-        self.current_temp_dir = temp_dir
-
-        # Calculate dynamic timeout: minimum 300 seconds, plus 1 second for every 10 MB
-        timeout = max(300, int(file_size / (10 * 1024 * 1024)))
-
-        if is_rar:
-            self.log_message(f"Using system RAR utility for authentic split RAR volumes (-m0 zero-compression)...")
-            archive_base = os.path.join(temp_dir, file_name)
-            cmd = [rar_bin, "a", "-m0", f"-v{part_size_mb}m", "-y", archive_base, filePath]
-            try:
-                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=timeout)
-
-                # Natural sort key for parts
-                def natural_sort_key(s):
-                    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
-
-                # Retrieve all generated part files (sorted naturally)
-                part_paths = []
-                for f in sorted(os.listdir(temp_dir), key=natural_sort_key):
-                    if f.startswith(file_name) and f.endswith(".rar"):
-                        part_paths.append(os.path.join(temp_dir, f))
-
-                if part_paths:
-                    self.safe_after(0, self.hide_splitting_banner)
-                    self.create_manifest_file(filePath, part_paths, is_rar=True)
-                    manifest_path = os.path.join(temp_dir, "manifest.txt")
-                    if os.path.exists(manifest_path):
-                        part_paths.append(manifest_path)
-                    return part_paths, True
-            except subprocess.TimeoutExpired:
-                self.log_message(f"System RAR command timed out after {timeout} seconds. Cleaning up partial RAR volumes...")
-                self.cleanup_temp_dir(temp_dir)
-            except Exception as e:
-                self.log_message(f"System RAR command failed: {str(e)}. Cleaning up partial RAR volumes...")
-                self.cleanup_temp_dir(temp_dir)
-
-        # Fallback native binary splitter
-        part_paths = []
-        part_num = 1
-        buffer_size = 10 * 1024 * 1024  # 10 MB buffer
+        if file_size > limit:
+            import shutil
+            rar_bin = shutil.which("rar")
+            is_rar = bool(rar_bin)
+            file_name = os.path.basename(filePath)
+            self.safe_after(0, self.show_splitting_banner, file_name, file_size, is_rar)
 
         try:
-            with open(filePath, 'rb') as f:
-                while True:
-                    # Name fallback files clearly as .part001, .part002 (no .rar)
-                    part_name = f"{file_name}.part{part_num:03d}"
-                    part_path = os.path.join(temp_dir, part_name)
+            result = file_splitter.split_large_file(
+                filePath, temp_root=project_dir,
+                log_fn=self.log_message,
+                max_split_size=limit
+            )
+            self.current_temp_dir = result.temp_dir
+            return (result.paths, result.is_split)
+        finally:
+            if file_size > limit:
+                self.safe_after(0, self.hide_splitting_banner)
 
-                    bytes_written = 0
-                    with open(part_path, 'wb') as out_f:
-                        while bytes_written < part_size_bytes:
-                            read_len = min(buffer_size, part_size_bytes - bytes_written)
-                            chunk = f.read(read_len)
-                            if not chunk:
-                                break
-                            out_f.write(chunk)
-                            bytes_written += len(chunk)
+    def apply_transmission_result(self, result):
+        for sp in result.succeeded_paths:
+            if sp in self.selected_files:
+                self.selected_files.remove(sp)
+        self.refresh_queue_table()
 
-                    if bytes_written == 0:
-                        # Clean up the empty part file we created at EOF
-                        if os.path.exists(part_path):
-                            os.remove(part_path)
-                        break
-
-                    part_paths.append(part_path)
-                    self.log_message(f"Created raw part {part_num}: {part_name} ({self.format_bytes(bytes_written)})")
-                    part_num += 1
-
-            self.log_message("ℹ️ [Notice] Created raw binary parts (not RAR archives). These files must be combined sequentially to restore the original file.")
-            self.safe_after(0, self.hide_splitting_banner)
-            self.create_manifest_file(filePath, part_paths, is_rar=False)
-            manifest_path = os.path.join(temp_dir, "manifest.txt")
-            if os.path.exists(manifest_path):
-                part_paths.append(manifest_path)
-            return part_paths, True
-        except Exception as e:
-            self.safe_after(0, self.hide_splitting_banner)
-            self.log_message(f"Error splitting file '{file_name}': {str(e)}")
-            # Cleanup any partially written files
-            for p in part_paths:
-                if os.path.exists(p):
-                    try: os.remove(p)
-                    except: pass
-            if temp_dir:
-                self.safe_cleanup_temp_dir(temp_dir)
-            raise e
+        success = (result.success_count == result.total_count)
+        msg = result.final_message
+        if result.fatal_error and result.fatal_error.startswith("Worker exception: "):
+            msg = result.fatal_error
+        self.post_transmission_ui(success, msg)
 
     def transmission_worker(self, recipient):
         try:
             target_jid = ""
-
             if recipient in self.contacts_data:
                 target_jid = self.contacts_data[recipient]
             elif recipient.startswith("Manual Entry: +"):
                 target_jid = recipient.replace("Manual Entry: +", "") + "@s.whatsapp.net"
             else:
-                # Fallback direct string cleaning
                 digits = "".join(filter(str.isdigit, recipient))
                 if digits:
                     target_jid = digits + "@s.whatsapp.net"
@@ -879,130 +751,39 @@ class WatsUpUI:
                 self.safe_after(0, self.post_transmission_ui, False, "Invalid recipient selected.")
                 return
 
-            # Backup the list of files to process sequentially
+            # Read a snapshot of queue files. Worker only reads this snapshot.
             files_to_send = list(self.selected_files)
-            total_files = len(files_to_send)
 
-            self.log_message(f"Starting sequential transmission of {total_files} files...")
-            success_count = 0
-            succeeded_paths = []
-
-            for index, filePath in enumerate(files_to_send):
+            def split_adapter(path):
                 self.current_temp_dir = None
-                if not os.path.exists(filePath):
-                    self.log_message(f"File not found: {filePath}. Skipping...")
-                    continue
+                paths, is_split = self.split_large_file(path)
+                return file_splitter.SplitResult(
+                    paths=paths, is_split=is_split, temp_dir=self.current_temp_dir
+                )
 
-                fileName = os.path.basename(filePath)
-                file_num_str = f"({index + 1}/{total_files})"
+            project_dir = os.path.dirname(os.path.abspath(__file__))
+            def cleanup_adapter(temp_dir):
+                if temp_dir:
+                    return file_splitter.safe_cleanup_temp_dir(
+                        temp_dir, project_dir, self.log_message
+                    )
+                return False
 
-                # Check size and split if needed
-                paths_to_send = [filePath]
-                is_split = False
-                split_success = True
-                last_res = {}
+            result = transmission_helper.run_transmission_loop(
+                files_to_send=files_to_send,
+                target_jid=target_jid,
+                make_request_fn=self.make_api_request,
+                split_fn=split_adapter,
+                log_fn=self.log_message,
+                cleanup_fn=cleanup_adapter
+            )
 
-                try:
-                    try:
-                        paths_to_send, is_split = self.split_large_file(filePath)
-                    except Exception as e:
-                        self.log_message(f"Skipping '{fileName}' due to splitting failure: {str(e)}")
-                        split_success = False
-                        continue
-
-                    for part_idx, path in enumerate(paths_to_send):
-                        partName = os.path.basename(path)
-                        if is_split:
-                            part_str = f" [Part {part_idx + 1}/{len(paths_to_send)}]"
-                            self.log_message(f"Streaming file {index + 1} of {total_files}{part_str}: {partName}...")
-                        else:
-                            self.log_message(f"Streaming file {index + 1} of {total_files}: {fileName}...")
-
-                        # Introduce a 3-second breathing space between parts of the same split file
-                        if part_idx > 0:
-                            time.sleep(3)
-
-                        payload = {
-                            "filePath": path,
-                            "recipient": target_jid
-                        }
-
-                        # Record start time
-                        t_start = time.time()
-                        t_start_str = time.strftime("%H:%M:%S", time.localtime(t_start))
-                        self.log_message(f"-> Starting transmission of '{partName}' at {t_start_str}...")
-
-                        # Send file to engine API with safe long timeout (30 mins per file)
-                        res = self.make_api_request("/api/send", data=payload, timeout=1800)
-                        last_res = res
-
-                        t_end = time.time()
-                        t_end_str = time.strftime("%H:%M:%S", time.localtime(t_end))
-                        duration = t_end - t_start
-
-                        if not res.get("success", False):
-                            error_msg = res.get("error", "Unknown transmission error")
-                            self.log_message(f"❌ Failed to send '{partName}' (Failed at {t_end_str} after {duration:.1f}s). Error: {error_msg}")
-                            split_success = False
-                            break
-                        else:
-                            self.log_message(f"✅ Successfully sent '{partName}' (Completed at {t_end_str} in {duration:.1f}s)")
-                finally:
-                    # Clean up temporary split files if we generated them
-                    if is_split:
-                        self.log_message(f"Cleaning up temporary split files for '{fileName}'...")
-                        for path in paths_to_send:
-                            if path != filePath and os.path.exists(path):
-                                try: os.remove(path)
-                                except: pass
-                    # Enforce recursive cleanup on current_temp_dir
-                    if self.current_temp_dir:
-                        self.safe_cleanup_temp_dir(self.current_temp_dir)
-                        self.current_temp_dir = None
-
-                if split_success:
-                    success_count += 1
-                    succeeded_paths.append(filePath)
-                    self.log_message(f"Successfully sent {file_num_str}: {fileName}")
-                else:
-                    self.log_message(f"Failed to send {file_num_str}: {fileName}")
-                    # Verify if the failure was a fatal error (network offline / unauthorized token / disconnected)
-                    error_msg = last_res.get("error", "")
-                    status_code = last_res.get("status_code")
-                    is_fatal = False
-                    if last_res.get("offline_flag", False):
-                        is_fatal = True
-                    elif status_code == 401:
-                        is_fatal = True
-                    elif "unauthorized" in error_msg.lower():
-                        is_fatal = True
-                    elif "disconnected" in error_msg.lower():
-                        is_fatal = True
-
-                    if is_fatal:
-                        self.log_message("Fatal communication error encountered. Aborting transmission queue.")
-                        break
-
-                # Let the connection "breathe" for 5 seconds between files to avoid rate limiting
-                if index < total_files - 1:
-                    self.log_message("Waiting 5 seconds before starting next transfer...")
-                    time.sleep(5)
-
-            # Prune only successfully sent files from the queue list
-            for sp in succeeded_paths:
-                if sp in self.selected_files:
-                    self.selected_files.remove(sp)
-            self.safe_after(0, self.refresh_queue_table)
-
-            if success_count == total_files:
-                self.safe_after(0, self.post_transmission_ui, True, f"All {total_files} files streamed and sent successfully!")
-            elif success_count > 0:
-                self.safe_after(0, self.post_transmission_ui, False, f"Queue completed with warnings: Sent {success_count} of {total_files} files successfully.")
-            else:
-                self.safe_after(0, self.post_transmission_ui, False, "All file transmissions in the queue failed.")
+            self.safe_after(0, self.apply_transmission_result, result)
         except Exception as e:
             self.log_message(f"Critical error in transmission worker thread: {str(e)}")
             self.safe_after(0, self.post_transmission_ui, False, f"Worker exception: {str(e)}")
+        finally:
+            self.current_temp_dir = None
 
     def post_transmission_ui(self, success, message):
         self.send_btn.config(text="Send via local disk stream")
