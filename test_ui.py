@@ -724,7 +724,7 @@ class TestCharacterization(unittest.TestCase):
         with open(orig_file, "wb") as f:
             f.write(b"a" * 25)
         self.ui.max_split_size = 10
-        
+
         original_open = open
         def mock_open(file, mode='r', *args, **kwargs):
             if 'w' in mode and "watsup_temp_split_" in file:
@@ -760,7 +760,7 @@ class TestCharacterization(unittest.TestCase):
 
     def test_characterization_safe_cleanup_sanitization(self):
         project_dir = os.path.dirname(os.path.abspath(__file__))
-        
+
         with patch('shutil.rmtree') as mock_rmtree:
             self.ui.safe_cleanup_temp_dir("")
             self.ui.safe_cleanup_temp_dir(project_dir)
@@ -771,16 +771,16 @@ class TestCharacterization(unittest.TestCase):
         self.ui.selected_files = ["/path/to/file1.txt", "/path/to/file2.txt", "/path/to/file3.txt"]
         self.ui.contacts_data = {"👤 Alice": "123@s.whatsapp.net"}
         self.ui.split_large_file = MagicMock(side_effect=lambda f: ([f], False))
-        
+
         def mock_request(path, data=None, timeout=8):
             if data and "file1.txt" in data["filePath"]:
                 return {"success": True}
             elif data and "file2.txt" in data["filePath"]:
                 raise Exception("Network connection lost")
             return {"success": True}
-            
+
         self.ui.make_api_request = MagicMock(side_effect=mock_request)
-        
+
         with patch('os.path.exists', return_value=True):
             self.ui.transmission_worker("👤 Alice")
             self.assertIn("/path/to/file2.txt", self.ui.selected_files)

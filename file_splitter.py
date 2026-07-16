@@ -68,24 +68,24 @@ def safe_cleanup_temp_dir(temp_dir: str, temp_root: str, log_fn) -> bool:
     try:
         abs_temp = os.path.realpath(temp_dir)
         abs_root = os.path.realpath(temp_root)
-        
+
         if abs_temp == abs_root:
             log_fn("Cleanup rejected: temp_dir matches temp_root")
-            return False
-        
+            raise ValueError("Cleanup rejected: temp_dir matches temp_root")
+
         if abs_temp in ("/", "\\") or os.path.dirname(abs_temp) == abs_temp:
             log_fn("Cleanup rejected: temp_dir matches root folder")
-            return False
-            
+            raise ValueError("Cleanup rejected: temp_dir matches root folder")
+
         if not abs_temp.startswith(abs_root + os.sep):
             log_fn("Cleanup rejected: temp_dir is not a strict child of temp_root (path escape detected)")
-            return False
-            
+            raise ValueError("Cleanup rejected: temp_dir is not a strict child of temp_root")
+
         is_correct_name = os.path.basename(abs_temp).startswith("watsup_temp_split_")
         if not is_correct_name:
             log_fn("Cleanup rejected: temp_dir name pattern invalid")
-            return False
-            
+            raise ValueError("Cleanup rejected: temp_dir name pattern invalid")
+
         if os.path.exists(abs_temp):
             shutil.rmtree(abs_temp)
             log_fn(f"🧹 Cleaned up temporary split directory: {os.path.basename(abs_temp)}")
@@ -93,6 +93,8 @@ def safe_cleanup_temp_dir(temp_dir: str, temp_root: str, log_fn) -> bool:
         return False
     except Exception as e:
         log_fn(f"Cleanup warning: {str(e)}")
+        if isinstance(e, ValueError):
+            raise e
         return False
 
 def split_large_file(
@@ -109,12 +111,15 @@ def split_large_file(
     part_size_bytes = math.ceil(file_size / num_parts)
     part_size_mb = math.ceil(part_size_bytes / (1024 * 1024))
     file_name = os.path.basename(filePath)
-    
+
     abs_root = os.path.realpath(temp_root)
     temp_dir = tempfile.mkdtemp(prefix="watsup_temp_split_", dir=abs_root)
     abs_temp = os.path.realpath(temp_dir)
     if not abs_temp.startswith(abs_root + os.sep):
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        try:
+            safe_cleanup_temp_dir(temp_dir, temp_root, log_fn)
+        except ValueError:
+            pass
         raise ValueError("Created temp directory is not a strict child of temp_root")
 
     log_fn(f"⚠️ [Large File Detected] Natively splitting '{file_name}' ({format_bytes(file_size)}) into {num_parts} equally-sized parts (~{format_bytes(part_size_bytes)} each). Please wait, zero-CPU / zero-RAM active...")
@@ -194,5 +199,8 @@ def split_large_file(
                     os.remove(p)
                 except Exception:
                     pass
-        safe_cleanup_temp_dir(temp_dir, temp_root, log_fn)
+        try:
+            safe_cleanup_temp_dir(temp_dir, temp_root, log_fn)
+        except ValueError:
+            pass
         raise e

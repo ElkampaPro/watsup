@@ -29,16 +29,14 @@ class TestTransmissionHelper(unittest.TestCase):
 
             log_msgs = []
             log_fn = lambda m: log_msgs.append(m)
-            
-            # Mock split_fn to return no split
+
             from file_splitter import SplitResult
             split_fn = MagicMock(return_value=SplitResult(paths=[files[0]], is_split=False, temp_dir=None))
-            
+
             make_request = MagicMock(return_value={"success": True})
-            cleanup_fn = MagicMock()
+            cleanup_fn = MagicMock(return_value=True)
             sleep_fn = MagicMock()
 
-            # Process file 1
             split_fn.side_effect = [
                 SplitResult(paths=[files[0]], is_split=False, temp_dir=None),
                 SplitResult(paths=[files[1]], is_split=False, temp_dir=None)
@@ -60,7 +58,6 @@ class TestTransmissionHelper(unittest.TestCase):
             self.assertEqual(res.failed_paths, [])
             self.assertFalse(res.aborted)
             self.assertIsNone(res.fatal_error)
-            # Sleep should be called once between files (5s)
             sleep_fn.assert_called_once_with(5)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -78,16 +75,15 @@ class TestTransmissionHelper(unittest.TestCase):
 
             log_msgs = []
             log_fn = lambda m: log_msgs.append(m)
-            
+
             from file_splitter import SplitResult
             split_fn = MagicMock(side_effect=[
                 SplitResult(paths=[files[0]], is_split=False, temp_dir=None),
                 SplitResult(paths=[files[1]], is_split=False, temp_dir=None)
             ])
-            
-            # First file fails fatally
+
             make_request = MagicMock(return_value={"success": False, "status_code": 401, "error": "Unauthorized"})
-            cleanup_fn = MagicMock()
+            cleanup_fn = MagicMock(return_value=True)
             sleep_fn = MagicMock()
 
             res = transmission_helper.run_transmission_loop(
@@ -103,7 +99,7 @@ class TestTransmissionHelper(unittest.TestCase):
             self.assertEqual(res.total_count, 2)
             self.assertEqual(res.success_count, 0)
             self.assertEqual(res.succeeded_paths, [])
-            self.assertEqual(res.failed_paths, [files[0]]) # f2 never attempted
+            self.assertEqual(res.failed_paths, [files[0]])
             self.assertTrue(res.aborted)
             self.assertEqual(res.fatal_error, "Unauthorized")
             sleep_fn.assert_not_called()
@@ -124,15 +120,14 @@ class TestTransmissionHelper(unittest.TestCase):
 
             log_msgs = []
             log_fn = lambda m: log_msgs.append(m)
-            
+
             from file_splitter import SplitResult
             split_fn = MagicMock(side_effect=[
                 SplitResult(paths=[files[0]], is_split=False, temp_dir=None),
                 SplitResult(paths=[files[1]], is_split=False, temp_dir=None),
                 SplitResult(paths=[files[2]], is_split=False, temp_dir=None)
             ])
-            
-            # File 1 succeeds, File 2 raises exception, File 3 never run
+
             def mock_request(path, data, timeout):
                 if "f1.txt" in data["filePath"]:
                     return {"success": True}
@@ -141,7 +136,7 @@ class TestTransmissionHelper(unittest.TestCase):
                 return {"success": True}
 
             make_request = MagicMock(side_effect=mock_request)
-            cleanup_fn = MagicMock()
+            cleanup_fn = MagicMock(return_value=True)
             sleep_fn = MagicMock()
 
             res = transmission_helper.run_transmission_loop(
@@ -154,13 +149,80 @@ class TestTransmissionHelper(unittest.TestCase):
                 sleep_fn=sleep_fn
             )
 
-            # Assertions
             self.assertEqual(res.total_count, 3)
             self.assertEqual(res.success_count, 1)
             self.assertEqual(res.succeeded_paths, [files[0]])
-            # f2 was attempted and failed. f3 was not attempted, so f2 and f3 are not in succeeded_paths.
             self.assertTrue(res.aborted)
             self.assertEqual(res.fatal_error, "Worker exception: Socket timeout")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_run_transmission_loop_victim_preservation(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            victim_file = os.path.join(temp_dir, "victim.txt")
+            with open(victim_file, "wb") as f:
+                f.write(b"victim_data")
+
+            log_msgs = []
+            log_fn = lambda m: log_msgs.append(m)
+
+            from file_splitter import SplitResult
+            split_fn = MagicMock(return_value=SplitResult(paths=[victim_file], is_split=True, temp_dir=None))
+
+            make_request = MagicMock(return_value={"success": True})
+            cleanup_fn = MagicMock(return_value=True)
+            sleep_fn = MagicMock()
+
+            res = transmission_helper.run_transmission_loop(
+                files_to_send=[victim_file],
+                target_jid="123@s.whatsapp.net",
+                make_request_fn=make_request,
+                split_fn=split_fn,
+                log_fn=log_fn,
+                cleanup_fn=cleanup_fn,
+                sleep_fn=sleep_fn
+            )
+
+            self.assertEqual(res.success_count, 1)
+            # Verify victim file is NOT deleted!
+            self.assertTrue(os.path.exists(victim_file))
+            cleanup_fn.assert_not_called()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_run_transmission_loop_cleanup_failure_logged(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            test_file = os.path.join(temp_dir, "f1.txt")
+            with open(test_file, "wb") as f:
+                f.write(b"content")
+
+            log_msgs = []
+            log_fn = lambda m: log_msgs.append(m)
+
+            from file_splitter import SplitResult
+            split_fn = MagicMock(return_value=SplitResult(paths=[test_file], is_split=True, temp_dir=temp_dir))
+
+            make_request = MagicMock(return_value={"success": True})
+            cleanup_fn = MagicMock(return_value=False)
+            sleep_fn = MagicMock()
+
+            res = transmission_helper.run_transmission_loop(
+                files_to_send=[test_file],
+                target_jid="123@s.whatsapp.net",
+                make_request_fn=make_request,
+                split_fn=split_fn,
+                log_fn=log_fn,
+                cleanup_fn=cleanup_fn,
+                sleep_fn=sleep_fn
+            )
+
+            self.assertEqual(res.success_count, 1)
+            cleanup_fn.assert_called_once_with(temp_dir)
+            # Verify that cleanup failure was logged
+            logged_failures = [m for m in log_msgs if f"Cleanup failure for {temp_dir}" in m]
+            self.assertTrue(len(logged_failures) > 0)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -169,7 +231,7 @@ class TestTransmissionHelper(unittest.TestCase):
         try:
             script_path = os.path.join(temp_dir, "verify_import.py")
             transmission_helper_abs = os.path.abspath("transmission_helper.py")
-            
+
             script_code = f"""
 import sys
 import os
@@ -186,7 +248,7 @@ print("ok")
 """
             with open(script_path, "w", encoding="utf-8") as f:
                 f.write(script_code)
-                
+
             out = subprocess.check_output([sys.executable, script_path], cwd=temp_dir, text=True).strip()
             self.assertEqual(out, "ok")
         finally:

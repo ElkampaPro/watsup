@@ -697,7 +697,10 @@ class WatsUpUI:
 
     def safe_cleanup_temp_dir(self, temp_dir):
         project_dir = os.path.dirname(os.path.abspath(__file__))
-        file_splitter.safe_cleanup_temp_dir(temp_dir, project_dir, self.log_message)
+        try:
+            file_splitter.safe_cleanup_temp_dir(temp_dir, project_dir, self.log_message)
+        except Exception as e:
+            self.log_message(f"Cleanup warning: {str(e)}")
 
     def split_large_file(self, filePath):
         project_dir = os.path.dirname(os.path.abspath(__file__))
