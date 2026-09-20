@@ -108,8 +108,8 @@ def run_transmission_loop(
                 t_end_str = time.strftime("%H:%M:%S", time.localtime(t_end))
                 duration = t_end - t_start
 
-                if not res.get("success", False):
-                    error_msg = res.get("error", "Unknown transmission error")
+                if not isinstance(res, dict) or not res.get("success", False):
+                    error_msg = res.get("error", "Unknown transmission error") if isinstance(res, dict) else f"Invalid response from server: {res}"
                     log_fn(f"❌ Failed to send '{partName}' (Failed at {t_end_str} after {duration:.1f}s). Error: {error_msg}")
                     split_success = False
                     if is_fatal_response(res):

@@ -496,7 +496,7 @@ install_prerequisites() {
     else
         local node_ver
         node_ver=$(node -v 2>/dev/null | tr -d 'v' | cut -d. -f1)
-        if [ -z "$node_ver" ] || [ "$node_ver" -lt 18 ]; then
+        if [ -z "$node_ver" ] || [ "$node_ver" -lt 20 ]; then
             NEED_NODE_INSTALL=true
         fi
     fi
@@ -689,7 +689,7 @@ install_prerequisites() {
                 if command -v node &>/dev/null && command -v npm &>/dev/null; then
                     local node_ver
                     node_ver=$(node -v 2>/dev/null | tr -d 'v' | cut -d. -f1)
-                    if [ -n "$node_ver" ] && [ "$node_ver" -ge 18 ]; then
+                    if [ -n "$node_ver" ] && [ "$node_ver" -ge 20 ]; then
                         node_ok=true
                     fi
                 fi
@@ -726,7 +726,7 @@ install_prerequisites() {
             if command -v node &>/dev/null && command -v npm &>/dev/null; then
                 local node_ver
                 node_ver=$(node -v 2>/dev/null | tr -d 'v' | cut -d. -f1)
-                if [ -n "$node_ver" ] && [ "$node_ver" -ge 18 ]; then
+                if [ -n "$node_ver" ] && [ "$node_ver" -ge 20 ]; then
                     repair_ok=true
                 fi
             fi
@@ -766,8 +766,8 @@ install_prerequisites() {
         else
             local node_ver
             node_ver=$(node -v 2>/dev/null | tr -d 'v' | cut -d. -f1)
-            if [ -z "$node_ver" ] || [ "$node_ver" -lt 18 ]; then
-                final_missing+=("node>=18")
+            if [ -z "$node_ver" ] || [ "$node_ver" -lt 20 ]; then
+                final_missing+=("node>=20")
             fi
         fi
         if ! command -v npm &> /dev/null; then final_missing+=("npm"); fi

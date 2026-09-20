@@ -582,6 +582,11 @@ class TestCharacterization(unittest.TestCase):
         self.ui.show_splitting_banner = MagicMock()
         self.ui.hide_splitting_banner = MagicMock()
 
+    def tearDown(self):
+        if getattr(self, 'ui', None) and getattr(self.ui, 'current_temp_dir', None):
+            if os.path.exists(self.ui.current_temp_dir):
+                self.ui.safe_cleanup_temp_dir(self.ui.current_temp_dir)
+
     def test_characterization_manifest_rar(self):
         temp_dir = tempfile.mkdtemp()
         orig_file = os.path.join(temp_dir, "test_rar.zip")
