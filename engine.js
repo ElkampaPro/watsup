@@ -234,6 +234,10 @@ async function connectToWhatsApp() {
         browser: ['Linux', 'Chrome', '120.0.0.0'],
         printQRInTerminal: false, // We will custom print this to avoid overflow
         syncFullHistory: false,   // Do not sync history to conserve system RAM
+        shouldSyncHistoryMessage: () => false,
+        // Sending files and fetching groups do not need the optional props,
+        // blocklist and privacy queries that can time out during startup.
+        fireInitQueries: false,
         connectTimeoutMs: 60000,  // Increase connect timeout to 60s
         defaultQueryTimeoutMs: 180000, // Increase query timeout to 180s to avoid init queries timeout
         keepAliveIntervalMs: 15000 // Send keep-alive ping frame every 15s to prevent timeouts during heavy media transfers

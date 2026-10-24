@@ -257,8 +257,10 @@ class WatsUpUI:
         if self.upload_active:
             return
         # Open native Ubuntu file picker dialog (multiple selection enabled)
+        downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
         file_paths = filedialog.askopenfilenames(
             parent=self.root,
+            initialdir=downloads_dir if os.path.isdir(downloads_dir) else os.path.expanduser("~"),
             title="Select Document(s)/Video(s) to Stream (Max 2GB per file)"
         )
         if file_paths:
